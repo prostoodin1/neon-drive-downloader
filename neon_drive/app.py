@@ -15,6 +15,7 @@ from pathlib import Path
 import psutil
 from PySide6.QtCore import (
     QEasingCurve,
+    QEvent,
     QProcess,
     QProcessEnvironment,
     QPropertyAnimation,
@@ -25,23 +26,30 @@ from PySide6.QtCore import (
     Signal,
     Slot,
 )
-from PySide6.QtGui import QColor, QDesktopServices, QFont, QPainter, QPen, QTextCursor
+from PySide6.QtGui import QAction, QColor, QDesktopServices, QFont, QPainter, QPen, QTextCursor
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
+    QColorDialog,
+    QComboBox,
     QFileDialog,
     QFrame,
     QGraphicsOpacityEffect,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
     QScrollArea,
     QSizePolicy,
+    QSpinBox,
+    QStyle,
+    QSystemTrayIcon,
     QTabWidget,
     QVBoxLayout,
     QWidget,
@@ -50,6 +58,7 @@ from PySide6.QtWidgets import (
 from . import __version__
 from .updater import (
     REPOSITORY,
+    ReleaseHistoryThread,
     UpdateCheckThread,
     UpdateDownloadThread,
     launch_replacement,
@@ -125,25 +134,54 @@ def format_seconds(seconds: float | None) -> str:
     return f"{hours:02d}:{minutes:02d}:{secs:02d}" if hours else f"{minutes:02d}:{secs:02d}"
 
 
+class AnimatedProgressBar(QProgressBar):
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._animation = QPropertyAnimation(self, b"value", self)
+        self._animation.setDuration(260)
+        self._animation.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self.animations_enabled = True
+
+    def set_progress(self, value: int) -> None:
+        value = max(self.minimum(), min(self.maximum(), value))
+        if not self.animations_enabled or abs(value - self.value()) > 300:
+            self._animation.stop()
+            self.setValue(value)
+            return
+        self._animation.stop()
+        self._animation.setStartValue(self.value())
+        self._animation.setEndValue(value)
+        self._animation.start()
+
+
 class Ring(QWidget):
     def __init__(self) -> None:
         super().__init__()
         self.value = 0
+        self.track_color = QColor("#17242b")
+        self.accent_color = QColor("#00f0ff")
+        self.text_color = QColor("#e8fdff")
         self.setFixedSize(86, 86)
 
     def setValue(self, value: int) -> None:
         self.value = max(0, min(100, value))
         self.update()
 
+    def set_colors(self, track: str, accent: str, text: str) -> None:
+        self.track_color = QColor(track)
+        self.accent_color = QColor(accent)
+        self.text_color = QColor(text)
+        self.update()
+
     def paintEvent(self, event) -> None:  # noqa: N802
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
         rect = self.rect().adjusted(8, 8, -8, -8)
-        painter.setPen(QPen(QColor("#17242b"), 7, Qt.SolidLine, Qt.RoundCap))
+        painter.setPen(QPen(self.track_color, 7, Qt.SolidLine, Qt.RoundCap))
         painter.drawArc(rect, 0, 360 * 16)
-        painter.setPen(QPen(QColor("#00f0ff"), 7, Qt.SolidLine, Qt.RoundCap))
+        painter.setPen(QPen(self.accent_color, 7, Qt.SolidLine, Qt.RoundCap))
         painter.drawArc(rect, 90 * 16, -int(360 * 16 * self.value / 100))
-        painter.setPen(QColor("#e8fdff"))
+        painter.setPen(self.text_color)
         painter.setFont(QFont("Segoe UI", 13, QFont.DemiBold))
         painter.drawText(rect, Qt.AlignCenter, f"{self.value}%")
 
@@ -170,6 +208,8 @@ class Downloader(QProcess):
         self._user_stopped = False
         self._item_completed_bytes = 0
         self._active_file_bytes = 0
+        self._active_file_path = ""
+        self._pending_file_bytes: int | None = None
 
     def start_item(self, source: str, destination: Path) -> None:
         self.current = source
@@ -179,6 +219,9 @@ class Downloader(QProcess):
         self._user_stopped = False
         self._item_completed_bytes = 0
         self._active_file_bytes = 0
+        self._active_file_path = ""
+        self._pending_file_bytes = None
+        self.buffer = ""
         path = Path(source)
         common = [
             "/Z", "/J", "/R:20", "/W:10", "/COPY:DAT", "/DCOPY:DAT",
@@ -202,31 +245,58 @@ class Downloader(QProcess):
     def _read(self) -> None:
         text = bytes(self.readAllStandardOutput()).decode(self.encoding, errors="replace")
         self.buffer += text
-        # tqdm redraws a single line with carriage returns.
-        for line in re.split(r"[\r\n]+", text):
-            if not line.strip():
-                continue
-            file_match = re.search(r"\s(?P<size>\d+)\s+\d{4}/\d{2}/\d{2}\s+", line)
-            if file_match:
-                if self._active_file_bytes:
-                    self._item_completed_bytes += self._active_file_bytes
-                self._active_file_bytes = int(file_match.group("size"))
-            match = PERCENT_RE.search(line)
-            if match:
-                pct = float(match.group("pct").replace(",", "."))
-                pct = min(100.0, pct)
-                item_bytes = self._item_completed_bytes + int(self._active_file_bytes * pct / 100)
-                self.progress.emit(self.current, pct, float(item_bytes))
-                whole = int(pct)
-                if whole != self._last_logged_percent:
-                    self._last_logged_percent = whole
-                    self.log.emit(f"Прогресс текущего файла: {pct:.1f}%\n")
+        # Robocopy uses both newlines and carriage returns for its ETA updates.
+        lines = re.split(r"\r\n|\r|\n", self.buffer)
+        self.buffer = lines.pop()
+        for line in lines:
+            self._handle_output_line(line)
+
+    def _handle_output_line(self, line: str) -> None:
+        if not line.strip():
+            return
+        stripped = line.strip()
+        if self._pending_file_bytes is not None and re.match(r"^(?:[A-Za-z]:\\|\\\\)", stripped):
+            self._activate_file(self._pending_file_bytes, stripped)
+            self._pending_file_bytes = None
+        file_match = re.search(
+            r"\s(?P<size>\d+)\s+\d{4}/\d{2}/\d{2}\s+\d{2}:\d{2}:\d{2}(?:\s+(?P<path>.+))?$",
+            line,
+        )
+        if file_match:
+            file_bytes = int(file_match.group("size"))
+            file_path = (file_match.group("path") or "").strip()
+            if file_path:
+                self._activate_file(file_bytes, file_path)
+                self._pending_file_bytes = None
             else:
-                self.log.emit(line.rstrip() + "\n")
+                self._pending_file_bytes = file_bytes
+        match = PERCENT_RE.search(line)
+        if match:
+            pct = float(match.group("pct").replace(",", "."))
+            pct = min(100.0, pct)
+            item_bytes = self._item_completed_bytes + int(self._active_file_bytes * pct / 100)
+            self.progress.emit(self.current, pct, float(item_bytes))
+            whole = int(pct)
+            if whole != self._last_logged_percent:
+                self._last_logged_percent = whole
+                self.log.emit(f"Прогресс текущего файла: {pct:.1f}%\n")
+        else:
+            self.log.emit(line.rstrip() + "\n")
+
+    def _activate_file(self, file_bytes: int, file_path: str) -> None:
+        if self._active_file_bytes and file_path != self._active_file_path:
+            self._item_completed_bytes += self._active_file_bytes
+        self._active_file_bytes = file_bytes
+        self._active_file_path = file_path
 
     def _finished(self, exit_code: int, status: QProcess.ExitStatus) -> None:
         if self._done_emitted:
             return
+        if self.bytesAvailable():
+            self._read()
+        if self.buffer.strip():
+            self._handle_output_line(self.buffer)
+            self.buffer = ""
         self._done_emitted = True
         description = ROBOCOPY_CODES.get(exit_code, "Robocopy сообщил комбинированный код ошибки.")
         if self._user_stopped:
@@ -256,53 +326,93 @@ class Downloader(QProcess):
         if not self.processId():
             return
         self._user_stopped = True
-        proc = psutil.Process(self.processId())
-        for child in proc.children(recursive=True):
-            child.terminate()
-        proc.terminate()
+        try:
+            proc = psutil.Process(self.processId())
+            for child in proc.children(recursive=True):
+                try:
+                    child.terminate()
+                except psutil.Error:
+                    continue
+            proc.terminate()
+        except psutil.Error:
+            self.kill()
 
 
 class FileRow(QFrame):
-    def __init__(self, source: str, destination: Path, compact: bool = False) -> None:
+    def __init__(
+        self,
+        source: str,
+        destination: Path,
+        compact: bool = False,
+        display_mode: str = "list",
+        animations_enabled: bool = True,
+    ) -> None:
         super().__init__(objectName="fileRow")
         self.source = source
         self.destination = destination
+        self.display_mode = display_mode
         self.size = 0
         self.downloaded = 0
-        self.setMinimumHeight(82 if compact else 106)
+        if display_mode == "shortcut":
+            self.setMinimumHeight(150 if not compact else 125)
+        else:
+            self.setMinimumHeight(86 if compact else 116)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(14, 11, 14, 11)
         layout.setSpacing(7)
         top = QHBoxLayout()
-        self.path_button = QPushButton(source)
-        self.path_button.setObjectName("pathButton")
+        button_text = source if display_mode == "paths" else (Path(source).name or source)
+        self.path_button = QPushButton(button_text)
+        self.path_button.setObjectName("tilePathButton" if display_mode == "shortcut" else "pathButton")
         self.path_button.setToolTip(source)
-        self.path_button.clicked.connect(self.open_location)
+        self.path_button.clicked.connect(self.open_source)
+        if display_mode == "shortcut":
+            icon_type = (
+                QStyle.StandardPixmap.SP_DirIcon
+                if Path(source).is_dir()
+                else QStyle.StandardPixmap.SP_FileIcon
+            )
+            self.path_button.setIcon(QApplication.style().standardIcon(icon_type))
+            self.path_button.setMinimumHeight(54)
         self.status = QLabel("ОЖИДАНИЕ")
         self.status.setObjectName("fileStatus")
         top.addWidget(self.path_button, 1)
         top.addWidget(self.status)
         layout.addLayout(top)
-        self.progress = QProgressBar()
+        self.progress = AnimatedProgressBar()
         self.progress.setRange(0, 1000)
         self.progress.setTextVisible(False)
+        self.progress.animations_enabled = animations_enabled
         layout.addWidget(self.progress)
+        self.destination_button = QPushButton(f"Куда: {self.target_path()}")
+        self.destination_button.setObjectName("folderLink")
+        self.destination_button.setToolTip(str(self.target_path()))
+        self.destination_button.clicked.connect(self.open_destination)
+        layout.addWidget(self.destination_button)
         self.info = QLabel("Размер определяется…")
         self.info.setObjectName("fileInfo")
-        self.info.setAlignment(Qt.AlignmentFlag.AlignRight)
+        self.info.setAlignment(
+            Qt.AlignmentFlag.AlignLeft if display_mode == "paths" else Qt.AlignmentFlag.AlignRight
+        )
         layout.addWidget(self.info)
 
     def target_path(self) -> Path:
         path = Path(self.source)
         return self.destination / (path.name or path.drive.rstrip(":\\"))
 
-    def open_location(self) -> None:
-        target = self.target_path()
-        path = target if target.exists() else Path(self.source)
+    @staticmethod
+    def reveal(path: Path) -> None:
         if path.is_dir():
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
         else:
             QProcess.startDetached("explorer.exe", ["/select,", str(path)])
+
+    def open_source(self) -> None:
+        self.reveal(Path(self.source))
+
+    def open_destination(self) -> None:
+        target = self.target_path()
+        self.reveal(target if target.exists() else self.destination)
 
     def update_data(
         self,
@@ -315,7 +425,7 @@ class FileRow(QFrame):
         self.size = size
         self.downloaded = min(downloaded, size) if size else downloaded
         percent = self.downloaded / size if size else 0
-        self.progress.setValue(round(percent * 1000))
+        self.progress.set_progress(round(percent * 1000))
         self.status.setText(state)
         remaining = max(0, size - self.downloaded)
         eta = remaining / speed if speed > 0 else None
@@ -331,6 +441,7 @@ class TaskInfo:
     source: str
     size: int
     downloaded: int = 0
+    fraction: float = 0.0
     speed: float = 0.0
     status: str = "ОЖИДАНИЕ"
     started_at: float | None = None
@@ -372,12 +483,19 @@ class MainWindow(QMainWindow):
         self.latest_update: dict | None = None
         self.update_check_thread: UpdateCheckThread | None = None
         self.update_download_thread: UpdateDownloadThread | None = None
+        self.release_history_thread: ReleaseHistoryThread | None = None
+        self.release_history: list[dict] = []
+        self.force_exit = False
+        self.settings_dirty = False
+        self.tray_icon: QSystemTrayIcon | None = None
         self._animations: list[QPropertyAnimation] = []
         self.metrics_timer = QTimer(self)
         self.metrics_timer.setInterval(1000)
         self.metrics_timer.timeout.connect(self.update_metrics)
         self.build_ui()
         self.restore_settings()
+        self.cleanup_old_logs()
+        self.setup_tray()
         QTimer.singleShot(4000, self.auto_check_updates)
 
     @staticmethod
@@ -401,18 +519,22 @@ class MainWindow(QMainWindow):
         outer.setContentsMargins(28, 22, 28, 20)
         outer.setSpacing(14)
 
-        title = QLabel("NEON <span style='color:#00f0ff'>DRIVE</span>")
+        title_row = QHBoxLayout()
+        title = QLabel("NEON")
         title.setObjectName("title")
+        brand_accent = QLabel("DRIVE")
+        brand_accent.setObjectName("brandAccent")
+        title_row.addWidget(title)
+        title_row.addWidget(brand_accent)
+        title_row.addStretch()
         subtitle = QLabel("GOOGLE DRIVE COPY CONSOLE")
         subtitle.setObjectName("subtitle")
-        outer.addWidget(title)
+        outer.addLayout(title_row)
         outer.addWidget(subtitle)
 
         self.tabs = QTabWidget(objectName="navTabs")
         self.tabs.addTab(self.build_download_tab(), "ЗАГРУЗКА")
-        self.tabs.addTab(self.build_files_tab(), "ФАЙЛЫ")
         self.tabs.addTab(self.build_settings_tab(), "НАСТРОЙКИ")
-        self.tabs.addTab(self.build_interface_tab(), "ИНТЕРФЕЙС")
         self.tabs.currentChanged.connect(self.animate_tab)
         outer.addWidget(self.tabs, 1)
 
@@ -443,7 +565,7 @@ class MainWindow(QMainWindow):
         status.addWidget(self.ring)
         progress_box = QVBoxLayout()
         self.progress_text = QLabel("ОБЩИЙ ПРОГРЕСС · 0 ИЗ 0", objectName="progressText")
-        self.progress = QProgressBar()
+        self.progress = AnimatedProgressBar()
         self.progress.setRange(0, 1000)
         self.progress.setTextVisible(False)
         progress_box.addWidget(self.progress_text)
@@ -463,8 +585,10 @@ class MainWindow(QMainWindow):
 
     def build_download_tab(self) -> QWidget:
         page = QWidget()
-        content = QHBoxLayout(page)
-        content.setContentsMargins(0, 12, 0, 4)
+        page_layout = QVBoxLayout(page)
+        page_layout.setContentsMargins(0, 12, 0, 4)
+        page_layout.setSpacing(14)
+        content = QHBoxLayout()
         content.setSpacing(18)
         form_card = self.card()
         form = QVBoxLayout(form_card)
@@ -475,11 +599,13 @@ class MainWindow(QMainWindow):
         self.sources.setPlaceholderText("Нажмите «Выбрать файлы» или «Выбрать папку»…")
         form.addWidget(self.sources, 1)
         source_buttons = QHBoxLayout()
-        self.choose_files_button = QPushButton("ВЫБРАТЬ ФАЙЛЫ")
+        self.choose_files_button = QPushButton("ФАЙЛЫ…")
+        self.choose_files_button.setToolTip("Выбрать один или несколько файлов")
         self.choose_files_button.clicked.connect(self.choose_files)
-        self.choose_folder_button = QPushButton("ВЫБРАТЬ ПАПКУ / ДИСК")
+        self.choose_folder_button = QPushButton("ПАПКА / ДИСК…")
+        self.choose_folder_button.setToolTip("Выбрать папку или подключённый диск")
         self.choose_folder_button.clicked.connect(self.choose_source_folder)
-        self.clear_button = QPushButton("ОЧИСТИТЬ")
+        self.clear_button = QPushButton("СБРОС")
         self.clear_button.clicked.connect(self.sources.clear)
         source_buttons.addWidget(self.choose_files_button)
         source_buttons.addWidget(self.choose_folder_button)
@@ -491,8 +617,12 @@ class MainWindow(QMainWindow):
         self.destination.setPlaceholderText("D:\\Downloads\\Google Drive")
         self.browse_button = QPushButton("ОБЗОР")
         self.browse_button.clicked.connect(self.choose_destination)
+        self.show_destination_button = QPushButton("ОТКРЫТЬ")
+        self.show_destination_button.setToolTip("Открыть папку загрузки")
+        self.show_destination_button.clicked.connect(self.open_destination_folder)
         destination_row.addWidget(self.destination, 1)
         destination_row.addWidget(self.browse_button)
+        destination_row.addWidget(self.show_destination_button)
         form.addLayout(destination_row)
         content.addWidget(form_card, 5)
 
@@ -507,70 +637,190 @@ class MainWindow(QMainWindow):
         controls = QHBoxLayout()
         self.pause_button = QPushButton("ПАУЗА")
         self.pause_button.clicked.connect(self.toggle_pause)
-        self.after_button = QPushButton("СТОП ПОСЛЕ ФАЙЛА")
+        self.after_button = QPushButton("ПОСЛЕ ФАЙЛА")
+        self.after_button.setToolTip("Остановить очередь после завершения активного файла")
         self.after_button.clicked.connect(self.toggle_stop_after)
-        self.stop_button = QPushButton("ОСТАНОВИТЬ", objectName="danger")
+        self.stop_button = QPushButton("СТОП", objectName="danger")
         self.stop_button.clicked.connect(self.stop_now)
-        open_logs = QPushButton("ОТКРЫТЬ ЛОГИ")
+        open_logs = QPushButton("ЛОГИ")
         open_logs.clicked.connect(self.open_logs)
         for button in (self.pause_button, self.after_button, self.stop_button, open_logs):
             controls.addWidget(button)
         terminal_layout.addLayout(controls)
         content.addWidget(terminal_card, 7)
-        return page
+        page_layout.addLayout(content, 3)
 
-    def build_files_tab(self) -> QWidget:
-        page = QWidget()
-        layout = QVBoxLayout(page)
-        layout.setContentsMargins(0, 12, 0, 4)
-        header = QHBoxLayout()
-        header.addWidget(self.label("ФАЙЛЫ · НАЖМИТЕ НА ПУТЬ, ЧТОБЫ ОТКРЫТЬ ЕГО В ПРОВОДНИКЕ"))
-        header.addStretch()
-        layout.addLayout(header)
+        files_card = self.card()
+        files_layout = QVBoxLayout(files_card)
+        files_layout.setContentsMargins(18, 14, 18, 14)
+        files_header = QHBoxLayout()
+        files_header.addWidget(self.label("ФАЙЛЫ В РАБОТЕ · ВИД МЕНЯЕТСЯ В НАСТРОЙКАХ"))
+        files_header.addStretch()
+        self.file_mode_label = QLabel("ПОДРОБНЫЙ СПИСОК")
+        self.file_mode_label.setObjectName("fileStatus")
+        files_header.addWidget(self.file_mode_label)
+        files_layout.addLayout(files_header)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         self.file_list_widget = QWidget()
-        self.file_list_layout = QVBoxLayout(self.file_list_widget)
+        self.file_list_layout = QGridLayout(self.file_list_widget)
         self.file_list_layout.setContentsMargins(0, 0, 0, 0)
         self.file_list_layout.setSpacing(10)
-        self.file_list_layout.addStretch()
         scroll.setWidget(self.file_list_widget)
-        layout.addWidget(scroll, 1)
+        files_layout.addWidget(scroll, 1)
+        page_layout.addWidget(files_card, 2)
         return page
 
     def build_settings_tab(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.setContentsMargins(0, 12, 0, 4)
-        card = self.card()
-        box = QVBoxLayout(card)
-        box.setContentsMargins(26, 24, 26, 24)
-        box.addWidget(self.label("МНОГОПОТОЧНОСТЬ"))
-        self.parallel_check = QCheckBox("Скачивать все выбранные файлы одновременно")
-        self.parallel_check.setObjectName("settingCheck")
-        self.parallel_check.stateChanged.connect(self.save_preferences)
-        box.addWidget(self.parallel_check)
-        description = QLabel(
-            "Снято: файлы скачиваются строго один за другим — стабильнее для Google Drive.\n"
-            "Установлено: для каждого файла запускается отдельный процесс Robocopy. "
-            "Суммарная скорость может вырасти, но нагрузка на сеть и диск будет выше."
+        layout.setSpacing(10)
+
+        self.restart_banner = QFrame(objectName="restartBanner")
+        restart_layout = QHBoxLayout(self.restart_banner)
+        restart_layout.setContentsMargins(18, 10, 12, 10)
+        restart_layout.addWidget(QLabel("Настройки изменены. Перезапустите приложение, чтобы применить их полностью."), 1)
+        self.restart_button = QPushButton("ПЕРЕЗАПУСТИТЬ")
+        self.restart_button.setObjectName("primarySmall")
+        self.restart_button.clicked.connect(self.restart_app)
+        restart_layout.addWidget(self.restart_button)
+        self.restart_banner.setVisible(False)
+        layout.addWidget(self.restart_banner)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        content = QWidget()
+        grid = QGridLayout(content)
+        grid.setContentsMargins(0, 0, 4, 0)
+        grid.setHorizontalSpacing(12)
+        grid.setVerticalSpacing(12)
+
+        def section(title: str) -> tuple[QFrame, QVBoxLayout]:
+            card = self.card()
+            card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+            box = QVBoxLayout(card)
+            box.setContentsMargins(20, 18, 20, 18)
+            box.setSpacing(9)
+            box.addWidget(self.label(title))
+            return card, box
+
+        speed_card, speed_box = section("СКОРОСТЬ И МНОГОПОТОЧНОСТЬ")
+        self.download_mode_combo = QComboBox()
+        self.download_mode_combo.addItem("Один файл за другим · стабильнее", "sequential")
+        self.download_mode_combo.addItem("Ограничить число одновременных", "limited")
+        self.download_mode_combo.addItem("Все файлы одновременно · максимум", "all")
+        speed_box.addWidget(self.download_mode_combo)
+        concurrency_row = QHBoxLayout()
+        concurrency_row.addWidget(QLabel("Одновременных загрузок:"))
+        self.concurrency_spin = QSpinBox()
+        self.concurrency_spin.setRange(2, 8)
+        self.concurrency_spin.setValue(3)
+        concurrency_row.addWidget(self.concurrency_spin)
+        concurrency_row.addStretch()
+        speed_box.addLayout(concurrency_row)
+        speed_note = QLabel(
+            "Несколько процессов могут ускорить загрузку, если Google Drive и диск не упираются "
+            "в общий лимит. Для больших файлов начните с 2–3 потоков."
         )
-        description.setObjectName("settingDescription")
-        description.setWordWrap(True)
-        box.addWidget(description)
-        separator = QFrame()
-        separator.setFrameShape(QFrame.Shape.HLine)
-        separator.setObjectName("separator")
-        box.addWidget(separator)
-        box.addWidget(self.label("ОБНОВЛЕНИЯ ЧЕРЕЗ GITHUB RELEASES"))
-        self.auto_update_check = QCheckBox("Автоматически проверять обновления при запуске")
-        self.auto_update_check.setObjectName("settingCheck")
-        self.auto_update_check.stateChanged.connect(self.save_preferences)
-        box.addWidget(self.auto_update_check)
-        update_row = QHBoxLayout()
+        speed_note.setObjectName("settingDescription")
+        speed_note.setWordWrap(True)
+        speed_box.addWidget(speed_note)
+        grid.addWidget(speed_card, 0, 0)
+
+        files_card, files_box = section("ОТОБРАЖЕНИЕ ФАЙЛОВ В ЗАГРУЗКЕ")
+        self.file_display_combo = QComboBox()
+        self.file_display_combo.addItem("Подробный список с прогрессом", "list")
+        self.file_display_combo.addItem("Ярлыки файлов / видео", "shortcut")
+        self.file_display_combo.addItem("Пути как в терминале", "paths")
+        files_box.addWidget(self.file_display_combo)
+        self.compact_check = QCheckBox("Компактные карточки")
+        self.compact_check.setObjectName("settingCheck")
+        files_box.addWidget(self.compact_check)
+        files_note = QLabel(
+            "Путь источника открывает его в Проводнике. Под прогрессом каждого файла всегда "
+            "доступна ссылка на папку назначения."
+        )
+        files_note.setObjectName("settingDescription")
+        files_note.setWordWrap(True)
+        files_box.addWidget(files_note)
+        grid.addWidget(files_card, 0, 1)
+
+        interface_card, interface_box = section("ТЕМА И ЦВЕТ КНОПОК")
+        self.theme_combo = QComboBox()
+        self.theme_combo.addItem("Чёрный OLED", "oled")
+        self.theme_combo.addItem("Тёмная тема", "dark")
+        self.theme_combo.addItem("Светлая тема", "light")
+        interface_box.addWidget(self.theme_combo)
+        accent_row = QHBoxLayout()
+        self.accent_combo = QComboBox()
+        self.accent_combo.addItem("Голубой неон", "#00e8f5")
+        self.accent_combo.addItem("Фиолетовый", "#9b6cff")
+        self.accent_combo.addItem("Зелёный", "#55e878")
+        self.accent_combo.addItem("Розовый", "#ff4f9a")
+        self.accent_combo.addItem("Оранжевый", "#ff9d3d")
+        self.custom_accent_button = QPushButton("СВОЙ ЦВЕТ…")
+        self.custom_accent_button.clicked.connect(self.choose_accent_color)
+        accent_row.addWidget(self.accent_combo, 1)
+        accent_row.addWidget(self.custom_accent_button)
+        interface_box.addLayout(accent_row)
+        self.accent_all_buttons_check = QCheckBox("Красить выбранным цветом все основные кнопки")
+        self.accent_all_buttons_check.setObjectName("settingCheck")
+        interface_box.addWidget(self.accent_all_buttons_check)
+        self.animations_check = QCheckBox("Плавные переходы и прогресс")
+        self.animations_check.setObjectName("settingCheck")
+        interface_box.addWidget(self.animations_check)
+        grid.addWidget(interface_card, 1, 0)
+
+        behavior_card, behavior_box = section("ФОНОВАЯ РАБОТА")
+        self.tray_check = QCheckBox("Сворачивать приложение в системный трей")
+        self.continue_in_tray_check = QCheckBox("При закрытии окна продолжать загрузку в трее")
+        self.notifications_check = QCheckBox("Показывать уведомление Windows по завершении")
+        self.auto_start_check = QCheckBox("Сразу начинать после добавления файлов")
+        self.smart_terminal_check = QCheckBox("Не прокручивать терминал вниз, когда я читаю лог выше")
+        for checkbox in (
+            self.tray_check,
+            self.continue_in_tray_check,
+            self.notifications_check,
+            self.auto_start_check,
+            self.smart_terminal_check,
+        ):
+            checkbox.setObjectName("settingCheck")
+            behavior_box.addWidget(checkbox)
+        grid.addWidget(behavior_card, 1, 1)
+
+        logs_card, logs_box = section("ЖУРНАЛЫ")
+        log_actions = QHBoxLayout()
+        open_logs_button = QPushButton("ОТКРЫТЬ ПАПКУ С ЛОГАМИ")
+        open_logs_button.clicked.connect(self.open_logs)
+        cleanup_now_button = QPushButton("ОЧИСТИТЬ СЕЙЧАС")
+        cleanup_now_button.clicked.connect(lambda: self.cleanup_old_logs(force=True))
+        log_actions.addWidget(open_logs_button)
+        log_actions.addWidget(cleanup_now_button)
+        logs_box.addLayout(log_actions)
+        self.cleanup_logs_check = QCheckBox("Автоматически удалять старые логи")
+        self.cleanup_logs_check.setObjectName("settingCheck")
+        logs_box.addWidget(self.cleanup_logs_check)
+        self.log_retention_combo = QComboBox()
+        self.log_retention_combo.addItem("Старше одной недели", 7)
+        self.log_retention_combo.addItem("Старше одного месяца", 30)
+        self.log_retention_combo.addItem("Старше трёх месяцев", 90)
+        self.log_retention_combo.addItem("Никогда", 0)
+        logs_box.addWidget(self.log_retention_combo)
+        grid.addWidget(logs_card, 2, 0)
+
+        update_card, update_box = section("ОБНОВЛЕНИЯ ЧЕРЕЗ GITHUB RELEASES")
+        self.update_mode_combo = QComboBox()
+        self.update_mode_combo.addItem("Автоматически проверять при запуске", "automatic")
+        self.update_mode_combo.addItem("Проверять и устанавливать вручную", "manual")
+        update_box.addWidget(self.update_mode_combo)
         self.update_status = QLabel(f"Текущая версия: {__version__}")
         self.update_status.setObjectName("settingDescription")
+        self.update_status.setWordWrap(True)
+        update_box.addWidget(self.update_status)
+        update_row = QHBoxLayout()
         self.check_update_button = QPushButton("ПРОВЕРИТЬ ОБНОВЛЕНИЯ")
         self.check_update_button.clicked.connect(lambda: self.check_updates(silent=False))
         self.install_update_button = QPushButton("СКАЧАТЬ И УСТАНОВИТЬ")
@@ -581,109 +831,278 @@ class MainWindow(QMainWindow):
         repo_button.clicked.connect(
             lambda: QDesktopServices.openUrl(QUrl(f"https://github.com/{REPOSITORY}"))
         )
-        update_row.addWidget(self.update_status, 1)
         update_row.addWidget(self.check_update_button)
         update_row.addWidget(self.install_update_button)
         update_row.addWidget(repo_button)
-        box.addLayout(update_row)
-        box.addStretch()
-        layout.addWidget(card)
-        layout.addStretch()
-        return page
+        update_box.addLayout(update_row)
+        self.manual_update_widget = QWidget()
+        manual_box = QVBoxLayout(self.manual_update_widget)
+        manual_box.setContentsMargins(0, 4, 0, 0)
+        manual_box.addWidget(QLabel("Предыдущие версии:"))
+        manual_row = QHBoxLayout()
+        self.release_combo = QComboBox()
+        self.release_combo.setMinimumWidth(220)
+        self.load_releases_button = QPushButton("ЗАГРУЗИТЬ СПИСОК")
+        self.load_releases_button.clicked.connect(self.load_release_history)
+        self.install_selected_button = QPushButton("УСТАНОВИТЬ ВЫБРАННУЮ")
+        self.install_selected_button.clicked.connect(self.install_selected_release)
+        self.install_selected_button.setEnabled(False)
+        manual_row.addWidget(self.release_combo, 1)
+        manual_row.addWidget(self.load_releases_button)
+        manual_row.addWidget(self.install_selected_button)
+        manual_box.addLayout(manual_row)
+        update_box.addWidget(self.manual_update_widget)
+        grid.addWidget(update_card, 2, 1)
 
-    def build_interface_tab(self) -> QWidget:
-        page = QWidget()
-        layout = QVBoxLayout(page)
-        layout.setContentsMargins(0, 12, 0, 4)
-        card = self.card()
-        box = QVBoxLayout(card)
-        box.setContentsMargins(26, 24, 26, 24)
-        box.addWidget(self.label("ОТОБРАЖЕНИЕ"))
-        self.animations_check = QCheckBox("Небольшие анимации при переходах между вкладками")
-        self.animations_check.setObjectName("settingCheck")
-        self.animations_check.stateChanged.connect(self.save_preferences)
-        box.addWidget(self.animations_check)
-        self.compact_check = QCheckBox("Компактные карточки файлов")
-        self.compact_check.setObjectName("settingCheck")
-        self.compact_check.stateChanged.connect(self.interface_changed)
-        box.addWidget(self.compact_check)
-        description = QLabel(
-            "Во вкладке «Файлы» каждый путь является кнопкой. Справа отображаются "
-            "скачанный и оставшийся объём, скорость, время работы и ETA."
-        )
-        description.setObjectName("settingDescription")
-        description.setWordWrap(True)
-        box.addWidget(description)
-        box.addStretch()
-        layout.addWidget(card)
-        layout.addStretch()
+        grid.setColumnStretch(0, 1)
+        grid.setColumnStretch(1, 1)
+        grid.setRowStretch(3, 1)
+        scroll.setWidget(content)
+        layout.addWidget(scroll, 1)
         return page
 
     def apply_theme(self) -> None:
-        self.setStyleSheet("""
-            * { font-family: 'Segoe UI'; color: #d9edf0; }
-            #root { background: #030607; }
-            #title { font-size: 28px; font-weight: 800; letter-spacing: 2px; }
-            #subtitle, #caption { color: #60777d; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
-            #state { color: #00f0ff; background: #07181b; border: 1px solid #0b464d; border-radius: 13px; padding: 6px 12px; }
-            #footerInfo { color: #60777d; }
-            #card, #fileRow { background: #080d0f; border: 1px solid #142429; border-radius: 14px; }
-            #fileRow:hover { border-color: #1a555e; }
-            QPlainTextEdit, QLineEdit { background: #030708; border: 1px solid #18343a; border-radius: 9px; padding: 11px; selection-background-color: #00a7b5; }
-            QPlainTextEdit:focus, QLineEdit:focus { border: 1px solid #00cbd8; }
-            #terminal { color: #7ef9ff; font-family: 'Cascadia Mono', Consolas; font-size: 11px; background: #020506; }
-            QPushButton { background: #10191c; border: 1px solid #263a40; border-radius: 8px; padding: 10px 14px; font-weight: 700; }
-            QPushButton:hover { border-color: #00dce8; color: #7cfcff; }
-            QPushButton:pressed { background: #071215; }
-            #pathButton { text-align: left; color: #77f8ff; background: transparent; border: 0; padding: 2px; font-weight: 600; }
-            #pathButton:hover { color: white; text-decoration: underline; }
-            #fileStatus { color: #86ff9d; font-weight: 800; }
-            #fileInfo { color: #8aa0a5; font-family: 'Cascadia Mono', Consolas; font-size: 11px; }
-            #danger:hover { border-color: #ff426d; color: #ff6c8d; }
-            #primary { background: #00d7e5; color: #001012; border: 1px solid #51f6ff; border-radius: 11px; font-size: 14px; letter-spacing: 1px; }
-            #primary:hover { background: #46f4ff; }
-            #primary:disabled { background: #12383c; color: #5f7a7e; border-color: #1b4b50; }
-            QProgressBar { background: #101a1d; border: 0; border-radius: 4px; height: 8px; }
-            QProgressBar::chunk { background: #00e8f5; border-radius: 4px; }
-            #progressText { font-size: 12px; font-weight: 700; }
-            #eta { color: #00efff; font-size: 22px; font-weight: 700; }
-            #speed { color: #86ff9d; font-size: 22px; font-weight: 700; min-width: 145px; }
-            #navTabs::pane { border: 0; }
-            QTabBar::tab { background: #080d0f; color: #688087; border: 1px solid #142429; padding: 10px 22px; margin-right: 5px; border-radius: 8px; font-weight: 700; }
-            QTabBar::tab:selected { color: #00efff; background: #07181b; border-color: #17616a; }
-            QTabBar::tab:hover { color: #b7fbff; border-color: #28525a; }
-            #settingCheck { font-size: 14px; spacing: 12px; padding: 12px 0; }
-            #settingDescription { color: #83979c; line-height: 1.5; padding: 8px 0; }
-            #separator { color: #153038; margin: 12px 0; }
-            #updateButton { color: #86ff9d; border-color: #347b48; }
-            QCheckBox::indicator { width: 21px; height: 21px; border: 1px solid #28515a; border-radius: 5px; background: #030708; }
-            QCheckBox::indicator:checked { background: #00d7e5; border-color: #5ff7ff; }
-            QScrollArea, QScrollArea > QWidget > QWidget { background: transparent; }
-            QScrollBar:vertical { background: transparent; width: 8px; }
-            QScrollBar::handle:vertical { background: #1a3a40; border-radius: 4px; }
+        theme = self.theme_combo.currentData() if hasattr(self, "theme_combo") else "oled"
+        themes = {
+            "oled": {
+                "background": "#000000", "card": "#080b0d", "input": "#020405",
+                "text": "#dcebed", "muted": "#71868b", "border": "#17282d",
+                "button": "#10171a", "track": "#132024", "terminal": "#020405",
+            },
+            "dark": {
+                "background": "#14181d", "card": "#1c2228", "input": "#10151a",
+                "text": "#e7edf0", "muted": "#93a1a8", "border": "#34414a",
+                "button": "#263039", "track": "#303b43", "terminal": "#0c1115",
+            },
+            "light": {
+                "background": "#eef2f5", "card": "#ffffff", "input": "#f8fafb",
+                "text": "#172127", "muted": "#66757d", "border": "#cdd8de",
+                "button": "#e6edf1", "track": "#d9e3e8", "terminal": "#101820",
+            },
+        }
+        colors = themes.get(str(theme), themes["oled"])
+        selected_accent = self.accent_combo.currentData() if hasattr(self, "accent_combo") else "#00e8f5"
+        accent = getattr(self, "accent_color", None) or str(selected_accent or "#00e8f5")
+        accent_color = QColor(accent)
+        if not accent_color.isValid():
+            accent_color = QColor("#00e8f5")
+        accent = accent_color.name()
+        accent_hover = accent_color.lighter(122).name()
+        accent_text = "#081012" if accent_color.lightness() > 145 else "#ffffff"
+        green = "#42d56b" if theme != "light" else "#16843a"
+        terminal_text = accent_color.lighter(135).name()
+        all_buttons = bool(
+            hasattr(self, "accent_all_buttons_check") and self.accent_all_buttons_check.isChecked()
+        )
+        general_button = (
+            f"background: {accent}; color: {accent_text}; border-color: {accent_hover};"
+            if all_buttons else
+            f"background: {colors['button']}; color: {colors['text']}; border-color: {colors['border']};"
+        )
+        self.setStyleSheet(f"""
+            * {{ font-family: 'Segoe UI'; color: {colors['text']}; }}
+            #root {{ background: {colors['background']}; }}
+            #title, #brandAccent {{ font-size: 28px; font-weight: 800; letter-spacing: 2px; }}
+            #brandAccent {{ color: {accent}; }}
+            #subtitle, #caption {{ color: {colors['muted']}; font-size: 10px; font-weight: 700; letter-spacing: 1px; }}
+            #state {{ color: {accent}; background: {colors['card']}; border: 1px solid {accent}; border-radius: 13px; padding: 6px 12px; }}
+            #footerInfo {{ color: {colors['muted']}; }}
+            #card, #fileRow {{ background: {colors['card']}; border: 1px solid {colors['border']}; border-radius: 14px; }}
+            #fileRow:hover {{ border-color: {accent}; }}
+            #restartBanner {{ background: {colors['card']}; border: 1px solid {accent}; border-radius: 11px; }}
+            QPlainTextEdit, QLineEdit, QComboBox, QSpinBox {{ background: {colors['input']}; color: {colors['text']}; border: 1px solid {colors['border']}; border-radius: 8px; padding: 8px 10px; selection-background-color: {accent}; }}
+            QComboBox QAbstractItemView {{ background: {colors['card']}; color: {colors['text']}; border: 1px solid {colors['border']}; selection-background-color: {accent}; selection-color: {accent_text}; }}
+            QPlainTextEdit:focus, QLineEdit:focus, QComboBox:focus, QSpinBox:focus {{ border-color: {accent}; }}
+            #terminal {{ color: {terminal_text}; font-family: 'Cascadia Mono', Consolas; font-size: 11px; background: {colors['terminal']}; }}
+            QPushButton {{ {general_button} border-width: 1px; border-style: solid; border-radius: 8px; padding: 9px 13px; font-weight: 700; }}
+            QPushButton:hover {{ border-color: {accent_hover}; color: {accent if not all_buttons else accent_text}; }}
+            QPushButton:pressed {{ background: {accent_color.darker(135).name()}; color: {accent_text}; }}
+            QPushButton:disabled {{ color: {colors['muted']}; border-color: {colors['border']}; background: {colors['track']}; }}
+            #pathButton, #folderLink {{ text-align: left; color: {accent}; background: transparent; border: 0; padding: 2px; font-weight: 600; }}
+            #pathButton:hover, #folderLink:hover {{ color: {accent_hover}; text-decoration: underline; }}
+            #tilePathButton {{ text-align: left; color: {accent}; background: {colors['input']}; border-color: {colors['border']}; }}
+            #fileStatus {{ color: {green}; font-weight: 800; }}
+            #fileInfo {{ color: {colors['muted']}; font-family: 'Cascadia Mono', Consolas; font-size: 11px; }}
+            #danger:hover {{ border-color: #ff426d; color: #ff426d; }}
+            #primary, #primarySmall {{ background: {accent}; color: {accent_text}; border: 1px solid {accent_hover}; border-radius: 10px; letter-spacing: 1px; }}
+            #primary {{ font-size: 14px; }}
+            #primary:hover, #primarySmall:hover {{ background: {accent_hover}; color: {accent_text}; }}
+            #primary:disabled {{ background: {colors['track']}; color: {colors['muted']}; border-color: {colors['border']}; }}
+            QProgressBar {{ background: {colors['track']}; border: 0; border-radius: 4px; height: 8px; }}
+            QProgressBar::chunk {{ background: {accent}; border-radius: 4px; }}
+            #progressText {{ font-size: 12px; font-weight: 700; }}
+            #eta {{ color: {accent}; font-size: 22px; font-weight: 700; }}
+            #speed {{ color: {green}; font-size: 22px; font-weight: 700; min-width: 145px; }}
+            #navTabs::pane {{ border: 0; }}
+            QTabBar::tab {{ background: {colors['card']}; color: {colors['muted']}; border: 1px solid {colors['border']}; padding: 10px 22px; margin-right: 5px; border-radius: 8px; font-weight: 700; }}
+            QTabBar::tab:selected {{ color: {accent}; background: {colors['input']}; border-color: {accent}; }}
+            QTabBar::tab:hover {{ color: {accent_hover}; border-color: {accent}; }}
+            #settingCheck {{ font-size: 13px; spacing: 10px; padding: 5px 0; }}
+            #settingDescription {{ color: {colors['muted']}; padding: 4px 0; }}
+            #separator {{ color: {colors['border']}; margin: 10px 0; }}
+            #updateButton {{ color: {green}; border-color: {green}; }}
+            QCheckBox::indicator {{ width: 19px; height: 19px; border: 1px solid {colors['border']}; border-radius: 5px; background: {colors['input']}; }}
+            QCheckBox::indicator:checked {{ background: {accent}; border-color: {accent_hover}; }}
+            QScrollArea, QScrollArea > QWidget > QWidget {{ background: transparent; }}
+            QScrollBar:vertical {{ background: transparent; width: 8px; }}
+            QScrollBar::handle:vertical {{ background: {colors['border']}; border-radius: 4px; min-height: 30px; }}
         """)
+        self.ring.set_colors(colors["track"], accent, colors["text"])
+        animations = not hasattr(self, "animations_check") or self.animations_check.isChecked()
+        self.progress.animations_enabled = animations
+        for row in self.file_rows.values():
+            row.progress.animations_enabled = animations
 
     def restore_settings(self) -> None:
-        self.parallel_check.setChecked(self.settings.value("parallel_downloads", False, type=bool))
-        self.auto_update_check.setChecked(self.settings.value("auto_updates", True, type=bool))
-        self.animations_check.setChecked(self.settings.value("animations", True, type=bool))
+        def select(combo: QComboBox, value) -> None:
+            index = combo.findData(value)
+            combo.setCurrentIndex(index if index >= 0 else 0)
+
+        old_parallel = self.settings.value("parallel_downloads", False, type=bool)
+        select(self.download_mode_combo, self.settings.value(
+            "download_mode", "all" if old_parallel else "sequential"
+        ))
+        self.concurrency_spin.setValue(self.settings.value("concurrency", 3, type=int))
+        select(self.file_display_combo, self.settings.value("file_display", "list"))
         self.compact_check.setChecked(self.settings.value("compact_rows", False, type=bool))
+        select(self.theme_combo, self.settings.value("theme", "oled"))
+        stored_accent = str(self.settings.value("accent_color", "#00e8f5"))
+        accent_index = self.accent_combo.findData(stored_accent)
+        if accent_index < 0:
+            self.accent_combo.addItem(f"Свой · {stored_accent.upper()}", stored_accent)
+            accent_index = self.accent_combo.count() - 1
+        self.accent_combo.setCurrentIndex(accent_index)
+        self.accent_color = stored_accent
+        self.accent_all_buttons_check.setChecked(
+            self.settings.value("accent_all_buttons", False, type=bool)
+        )
+        self.animations_check.setChecked(self.settings.value("animations", True, type=bool))
+        select(self.update_mode_combo, self.settings.value(
+            "update_mode",
+            "automatic" if self.settings.value("auto_updates", True, type=bool) else "manual",
+        ))
+        self.tray_check.setChecked(self.settings.value("tray_enabled", True, type=bool))
+        self.continue_in_tray_check.setChecked(
+            self.settings.value("continue_in_tray", True, type=bool)
+        )
+        self.notifications_check.setChecked(
+            self.settings.value("notifications", True, type=bool)
+        )
+        self.auto_start_check.setChecked(self.settings.value("auto_start", False, type=bool))
+        self.smart_terminal_check.setChecked(
+            self.settings.value("smart_terminal", True, type=bool)
+        )
+        self.cleanup_logs_check.setChecked(
+            self.settings.value("cleanup_logs", True, type=bool)
+        )
+        select(self.log_retention_combo, self.settings.value("log_retention_days", 30, type=int))
         self.destination.setText(self.settings.value("destination", str(Path.home() / "Downloads")))
         self.sources.setPlainText(self.settings.value("sources", ""))
+
+        for signal in (
+            self.download_mode_combo.currentIndexChanged,
+            self.concurrency_spin.valueChanged,
+            self.file_display_combo.currentIndexChanged,
+            self.compact_check.stateChanged,
+            self.theme_combo.currentIndexChanged,
+            self.accent_combo.currentIndexChanged,
+            self.accent_all_buttons_check.stateChanged,
+            self.animations_check.stateChanged,
+            self.update_mode_combo.currentIndexChanged,
+            self.tray_check.stateChanged,
+            self.continue_in_tray_check.stateChanged,
+            self.notifications_check.stateChanged,
+            self.auto_start_check.stateChanged,
+            self.smart_terminal_check.stateChanged,
+            self.cleanup_logs_check.stateChanged,
+            self.log_retention_combo.currentIndexChanged,
+        ):
+            signal.connect(self.settings_changed)
         self.sources.textChanged.connect(self.refresh_file_rows)
         self.destination.textChanged.connect(self.refresh_file_rows)
+        self.update_settings_visibility()
+        self.apply_theme()
         self.refresh_file_rows()
 
-    @Slot(int)
-    def save_preferences(self, _state: int = 0) -> None:
-        self.settings.setValue("parallel_downloads", self.parallel_check.isChecked())
-        self.settings.setValue("animations", self.animations_check.isChecked())
-        self.settings.setValue("auto_updates", self.auto_update_check.isChecked())
-
-    @Slot(int)
-    def interface_changed(self, _state: int = 0) -> None:
+    def persist_settings(self) -> None:
+        self.settings.setValue("download_mode", self.download_mode_combo.currentData())
+        self.settings.setValue("concurrency", self.concurrency_spin.value())
+        self.settings.setValue("file_display", self.file_display_combo.currentData())
         self.settings.setValue("compact_rows", self.compact_check.isChecked())
+        self.settings.setValue("theme", self.theme_combo.currentData())
+        self.settings.setValue("accent_color", self.accent_color)
+        self.settings.setValue("accent_all_buttons", self.accent_all_buttons_check.isChecked())
+        self.settings.setValue("animations", self.animations_check.isChecked())
+        self.settings.setValue("update_mode", self.update_mode_combo.currentData())
+        self.settings.setValue("tray_enabled", self.tray_check.isChecked())
+        self.settings.setValue("continue_in_tray", self.continue_in_tray_check.isChecked())
+        self.settings.setValue("notifications", self.notifications_check.isChecked())
+        self.settings.setValue("auto_start", self.auto_start_check.isChecked())
+        self.settings.setValue("smart_terminal", self.smart_terminal_check.isChecked())
+        self.settings.setValue("cleanup_logs", self.cleanup_logs_check.isChecked())
+        self.settings.setValue("log_retention_days", self.log_retention_combo.currentData())
+        self.settings.setValue("destination", self.destination.text())
+        self.settings.setValue("sources", self.sources.toPlainText())
+        self.settings.sync()
+
+    def settings_changed(self, *_args) -> None:
+        if self.sender() is self.accent_combo:
+            self.accent_color = str(self.accent_combo.currentData())
+        self.persist_settings()
+        self.settings_dirty = True
+        self.restart_banner.setVisible(True)
+        self.update_settings_visibility()
+        self.apply_theme()
         self.refresh_file_rows()
+        if self.sender() in (self.tray_check, self.notifications_check):
+            self.setup_tray()
+
+    def update_settings_visibility(self) -> None:
+        self.concurrency_spin.setEnabled(self.download_mode_combo.currentData() == "limited")
+        manual = self.update_mode_combo.currentData() == "manual"
+        self.manual_update_widget.setVisible(manual)
+        self.log_retention_combo.setEnabled(self.cleanup_logs_check.isChecked())
+
+    def choose_accent_color(self) -> None:
+        color = QColorDialog.getColor(QColor(self.accent_color), self, "Цвет кнопок и акцентов")
+        if not color.isValid():
+            return
+        value = color.name()
+        custom_index = self.accent_combo.findData(value)
+        if custom_index < 0:
+            if self.accent_combo.count() > 5:
+                self.accent_combo.removeItem(self.accent_combo.count() - 1)
+            self.accent_combo.addItem(f"Свой · {value.upper()}", value)
+            custom_index = self.accent_combo.count() - 1
+        self.accent_color = value
+        self.accent_combo.setCurrentIndex(custom_index)
+        self.settings_changed()
+
+    def restart_app(self) -> None:
+        if self.running:
+            QMessageBox.warning(self, APP_NAME, "Сначала завершите или остановите загрузки.")
+            return
+        if getattr(sys, "frozen", False):
+            program = sys.executable
+            arguments = sys.argv[1:]
+        else:
+            program = sys.executable
+            arguments = [str(resource_path("main.py")), *sys.argv[1:]]
+        started = QProcess.startDetached(program, arguments, str(Path.cwd()))
+        ok = started[0] if isinstance(started, tuple) else started
+        if not ok:
+            QMessageBox.critical(self, APP_NAME, "Не удалось перезапустить приложение.")
+            return
+        self.force_exit = True
+        QApplication.instance().quit()
+
+    def max_concurrent_downloads(self) -> int:
+        mode = self.download_mode_combo.currentData()
+        if mode == "sequential":
+            return 1
+        if mode == "limited":
+            return self.concurrency_spin.value()
+        return max(1, self.total_items)
 
     @Slot(int)
     def animate_tab(self, index: int) -> None:
@@ -707,10 +1126,27 @@ class MainWindow(QMainWindow):
         animation.finished.connect(cleanup)
         animation.start()
 
-    def choose_destination(self) -> None:
+    def choose_destination(self) -> bool:
         folder = QFileDialog.getExistingDirectory(self, "Выберите папку", self.destination.text())
         if folder:
             self.destination.setText(folder)
+            self.settings.setValue("destination", folder)
+            return True
+        return False
+
+    def open_destination_folder(self) -> None:
+        text = self.destination.text().strip()
+        if not text:
+            if not self.choose_destination():
+                return
+            text = self.destination.text().strip()
+        folder = Path(text).expanduser()
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            QMessageBox.warning(self, APP_NAME, f"Не удалось открыть папку:\n{exc}")
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))
 
     def _append_sources(self, paths: list[str]) -> None:
         existing = [line.strip() for line in self.sources.toPlainText().splitlines() if line.strip()]
@@ -728,6 +1164,7 @@ class MainWindow(QMainWindow):
         if files:
             self.settings.setValue("last_source_dir", str(Path(files[0]).parent))
             self._append_sources(files)
+            self.maybe_auto_start()
 
     def choose_source_folder(self) -> None:
         start = self.settings.value("last_source_dir", "")
@@ -735,6 +1172,14 @@ class MainWindow(QMainWindow):
         if folder:
             self.settings.setValue("last_source_dir", folder)
             self._append_sources([folder])
+            self.maybe_auto_start()
+
+    def maybe_auto_start(self) -> None:
+        if self.running or not self.auto_start_check.isChecked():
+            return
+        if not self.destination.text().strip() and not self.choose_destination():
+            return
+        QTimer.singleShot(150, self.start_downloads)
 
     def clear_file_rows(self) -> None:
         while self.file_list_layout.count():
@@ -748,22 +1193,40 @@ class MainWindow(QMainWindow):
             return
         items = [line.strip() for line in self.sources.toPlainText().splitlines() if line.strip()]
         destination = Path(self.destination.text().strip() or Path.home() / "Downloads")
+        mode = str(self.file_display_combo.currentData() or "list")
+        mode_names = {
+            "list": "ПОДРОБНЫЙ СПИСОК",
+            "shortcut": "ЯРЛЫКИ",
+            "paths": "ПУТИ КАК В ТЕРМИНАЛЕ",
+        }
+        self.file_mode_label.setText(mode_names.get(mode, mode_names["list"]))
         self.clear_file_rows()
-        for source in items:
-            row = FileRow(source, destination, self.compact_check.isChecked())
+        for index, source in enumerate(items):
+            row = FileRow(
+                source,
+                destination,
+                self.compact_check.isChecked(),
+                mode,
+                self.animations_check.isChecked(),
+            )
             try:
                 size = path_size(Path(source)) if Path(source).exists() else 0
             except OSError:
                 size = 0
             row.update_data(size, 0, 0, 0, "ОЖИДАНИЕ")
             self.file_rows[source] = row
-            self.file_list_layout.addWidget(row)
+            self.place_file_row(row, index, mode)
         if not items:
             empty = QLabel("Выбранные файлы появятся здесь")
             empty.setObjectName("settingDescription")
             empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.file_list_layout.addWidget(empty)
-        self.file_list_layout.addStretch()
+            self.file_list_layout.addWidget(empty, 0, 0, 1, 3)
+
+    def place_file_row(self, row: FileRow, index: int, mode: str) -> None:
+        if mode == "shortcut":
+            self.file_list_layout.addWidget(row, index // 3, index % 3)
+        else:
+            self.file_list_layout.addWidget(row, index, 0, 1, 3)
 
     def set_inputs_enabled(self, enabled: bool) -> None:
         for widget in (
@@ -773,16 +1236,27 @@ class MainWindow(QMainWindow):
             self.choose_folder_button,
             self.clear_button,
             self.browse_button,
-            self.parallel_check,
+            self.download_mode_combo,
+            self.concurrency_spin,
         ):
             widget.setEnabled(enabled)
 
     def start_downloads(self) -> None:
-        items = [line.strip() for line in self.sources.toPlainText().splitlines() if line.strip()]
-        destination = Path(self.destination.text().strip()).expanduser()
+        raw_items = [line.strip() for line in self.sources.toPlainText().splitlines() if line.strip()]
+        items: list[str] = []
+        seen: set[str] = set()
+        for item in raw_items:
+            normalized = os.path.normcase(os.path.normpath(item))
+            if normalized not in seen:
+                items.append(item)
+                seen.add(normalized)
         if not items:
             QMessageBox.warning(self, APP_NAME, "Выберите хотя бы один файл или папку.")
             return
+        if not self.destination.text().strip():
+            if not self.choose_destination():
+                return
+        destination = Path(self.destination.text().strip()).expanduser()
         missing = [item for item in items if not Path(item).exists()]
         if missing:
             QMessageBox.warning(self, APP_NAME, "Не найдены выбранные пути:\n" + "\n".join(missing[:5]))
@@ -800,7 +1274,7 @@ class MainWindow(QMainWindow):
 
         self.settings.setValue("destination", str(destination))
         self.settings.setValue("sources", self.sources.toPlainText())
-        self.save_preferences()
+        self.persist_settings()
         self.set_state("●  АНАЛИЗ ФАЙЛОВ")
         QApplication.processEvents()
         self.queue = deque(items)
@@ -830,40 +1304,51 @@ class MainWindow(QMainWindow):
         self.set_inputs_enabled(False)
         self.start_button.setEnabled(False)
         self.set_state("●  ЗАГРУЗКА")
-        self.footer_info.setText("Параллельно" if self.parallel_check.isChecked() else "Последовательно")
+        mode_names = {
+            "sequential": "Последовательно",
+            "limited": f"До {self.concurrency_spin.value()} одновременно",
+            "all": "Все одновременно",
+        }
+        selected_mode = str(self.download_mode_combo.currentData())
+        self.footer_info.setText(mode_names.get(selected_mode, "Последовательно"))
         self.speed.setText("ИЗМЕРЕНИЕ…")
         self.eta.setText("ИЗМЕРЕНИЕ…")
         self.metrics_timer.start()
         self.rebuild_task_rows(destination)
-        mode = "все одновременно" if self.parallel_check.isChecked() else "один за другим"
+        mode = mode_names.get(selected_mode, "Последовательно").lower()
         self.append_log(
             f"{APP_NAME}\nСеанс: {datetime.now():%Y-%m-%d %H:%M:%S}\nRobocopy: {robocopy}\n"
             f"Режим: {mode}\nОчередь: {len(items)}\nОбщий объём: {human_size(self.total_bytes)}\n"
             f"Назначение: {destination}\nСвободно: {human_size(usage.free)} из {human_size(usage.total)}\n"
             f"Лог: {self.log_path}\n"
         )
-        if self.parallel_check.isChecked():
-            while self.queue:
-                self.start_task(self.queue.popleft())
-        else:
-            self.start_next()
+        self.fill_worker_slots()
 
     def rebuild_task_rows(self, destination: Path) -> None:
         self.clear_file_rows()
-        for source, task in self.tasks.items():
-            row = FileRow(source, destination, self.compact_check.isChecked())
+        mode = str(self.file_display_combo.currentData() or "list")
+        for index, (source, task) in enumerate(self.tasks.items()):
+            row = FileRow(
+                source,
+                destination,
+                self.compact_check.isChecked(),
+                mode,
+                self.animations_check.isChecked(),
+            )
             row.update_data(task.size, 0, 0, 0, "ОЖИДАНИЕ")
             task.row = row
             self.file_rows[source] = row
-            self.file_list_layout.addWidget(row)
-        self.file_list_layout.addStretch()
+            self.place_file_row(row, index, mode)
 
     def start_next(self) -> None:
-        if self.stop_after_file or not self.queue:
-            if not self.workers:
-                self.finish_queue(stopped=self.stop_after_file)
-            return
-        self.start_task(self.queue.popleft())
+        self.fill_worker_slots()
+
+    def fill_worker_slots(self) -> None:
+        limit = self.max_concurrent_downloads()
+        while self.queue and len(self.workers) < limit and not self.stop_after_file:
+            self.start_task(self.queue.popleft())
+        if not self.workers and (not self.queue or self.stop_after_file):
+            self.finish_queue(stopped=self.stop_after_file)
 
     def start_task(self, source: str) -> None:
         task = self.tasks[source]
@@ -883,7 +1368,12 @@ class MainWindow(QMainWindow):
         task = self.tasks.get(source)
         if task is None:
             return
-        task.downloaded = min(int(item_bytes), task.size) if task.size else int(item_bytes)
+        measured = min(int(item_bytes), task.size) if task.size else int(item_bytes)
+        task.downloaded = max(task.downloaded, measured)
+        if task.size:
+            task.fraction = min(1.0, task.downloaded / task.size)
+        else:
+            task.fraction = max(task.fraction, min(1.0, percent / 100.0))
         now = time.monotonic()
         if not task.samples:
             task.samples.append((now, task.downloaded))
@@ -897,10 +1387,11 @@ class MainWindow(QMainWindow):
         if self.total_bytes:
             overall = min(1.0, self.measured_done_bytes / self.total_bytes)
         else:
-            overall = self.completed_items / max(1, self.total_items)
-        self.progress.setValue(round(overall * 1000))
+            overall = sum(task.fraction for task in self.tasks.values()) / max(1, self.total_items)
+        self.progress.set_progress(round(overall * 1000))
         self.ring.setValue(round(overall * 100))
         self.progress_text.setText(
+            f"ОБЩИЙ ПРОГРЕСС {overall * 100:.1f}% · "
             f"{human_size(self.measured_done_bytes)} ИЗ {human_size(self.total_bytes)} · "
             f"ГОТОВО {self.completed_items} ИЗ {self.total_items}"
         )
@@ -908,6 +1399,10 @@ class MainWindow(QMainWindow):
     @Slot()
     def update_metrics(self) -> None:
         now = time.monotonic()
+        if self.paused:
+            self.speed.setText("ПАУЗА")
+            self.eta.setText("ПАУЗА")
+            return
         for task in self.tasks.values():
             if task.started_at is None:
                 continue
@@ -924,7 +1419,7 @@ class MainWindow(QMainWindow):
             return
         self.measured_done_bytes = sum(item.downloaded for item in self.tasks.values())
         self.speed_samples.append((now, self.measured_done_bytes))
-        while len(self.speed_samples) > 2 and now - self.speed_samples[0][0] > 30:
+        while len(self.speed_samples) > 2 and now - self.speed_samples[0][0] > 15:
             self.speed_samples.popleft()
         first_time, first_bytes = self.speed_samples[0]
         elapsed = now - first_time
@@ -951,6 +1446,7 @@ class MainWindow(QMainWindow):
             task.finished_at = time.monotonic()
             if ok:
                 task.downloaded = task.size
+                task.fraction = 1.0
                 task.status = "ГОТОВО"
                 self.completed_items += 1
                 self.append_log(f"✓ Завершено: {source}\n")
@@ -967,15 +1463,7 @@ class MainWindow(QMainWindow):
             if not self.workers:
                 self.finish_queue(stopped=True)
             return
-        if self.parallel_check.isChecked():
-            if not self.workers:
-                self.finish_queue(stopped=self.stop_after_file)
-        elif self.stop_after_file:
-            self.finish_queue(stopped=True)
-        elif self.queue:
-            self.start_next()
-        else:
-            self.finish_queue(stopped=False)
+        self.fill_worker_slots()
 
     def toggle_pause(self) -> None:
         if not self.workers:
@@ -985,6 +1473,13 @@ class MainWindow(QMainWindow):
                 for worker in self.workers.values():
                     worker.resume()
                 self.paused = False
+                self.speed_samples.clear()
+                self.metrics_started = False
+                now = time.monotonic()
+                for task in self.tasks.values():
+                    task.samples.clear()
+                    if task.started_at is not None and task.finished_at is None:
+                        task.samples.append((now, task.downloaded))
                 self.pause_button.setText("ПАУЗА")
                 self.set_state("●  ЗАГРУЗКА")
                 self.append_log("▶ Все активные загрузки продолжены.\n")
@@ -1002,8 +1497,8 @@ class MainWindow(QMainWindow):
         if not self.workers:
             return
         self.stop_after_file = not self.stop_after_file
-        self.after_button.setText("ОТМЕНИТЬ СТОП" if self.stop_after_file else "СТОП ПОСЛЕ ФАЙЛА")
-        if self.parallel_check.isChecked():
+        self.after_button.setText("ОТМЕНИТЬ" if self.stop_after_file else "ПОСЛЕ ФАЙЛА")
+        if self.max_concurrent_downloads() > 1:
             message = "Новые задачи не запустятся; уже активные параллельные загрузки будут завершены.\n"
         else:
             message = "Текущий файл будет последним.\n"
@@ -1033,22 +1528,26 @@ class MainWindow(QMainWindow):
         self.start_button.setEnabled(True)
         self.set_inputs_enabled(True)
         self.pause_button.setText("ПАУЗА")
-        self.after_button.setText("СТОП ПОСЛЕ ФАЙЛА")
+        self.after_button.setText("ПОСЛЕ ФАЙЛА")
         if stopped:
             self.set_state("●  ОСТАНОВЛЕНО")
             self.append_log("\nОчередь остановлена. Частичные файлы оставлены для продолжения.\n")
+            notification = "Загрузка остановлена. Частичные файлы сохранены."
         elif self.failed_items:
             self.set_state("●  ЗАВЕРШЕНО С ОШИБКАМИ")
             self.append_log(f"\nЗавершено с ошибками: {self.failed_items}.\n")
+            notification = f"Очередь завершена. Ошибок: {self.failed_items}."
         else:
             self.set_state("●  ГОТОВО")
-            self.progress.setValue(1000)
+            self.progress.set_progress(1000)
             self.ring.setValue(100)
             self.eta.setText("00:00")
             self.append_log("\n✓ Вся очередь успешно загружена.\n")
+            notification = f"Все файлы загружены: {self.completed_items}."
         self.footer_info.setText(
             f"Готово: {self.completed_items}/{self.total_items} · Ошибок: {self.failed_items}"
         )
+        self.notify(APP_NAME, notification)
 
     def set_state(self, text: str) -> None:
         self.state_label.setText(text)
@@ -1060,18 +1559,124 @@ class MainWindow(QMainWindow):
                     stream.write(text)
             except OSError:
                 pass
+        scroll = self.terminal.verticalScrollBar()
+        old_position = scroll.value()
+        was_at_bottom = old_position >= scroll.maximum() - 3
         cursor = self.terminal.textCursor()
         cursor.movePosition(QTextCursor.MoveOperation.End)
         cursor.insertText(text)
         self.terminal.setTextCursor(cursor)
-        self.terminal.ensureCursorVisible()
+        smart_scroll = not hasattr(self, "smart_terminal_check") or self.smart_terminal_check.isChecked()
+        if was_at_bottom or not smart_scroll:
+            scroll.setValue(scroll.maximum())
+        else:
+            scroll.setValue(old_position)
 
     def open_logs(self) -> None:
         self.log_dir.mkdir(parents=True, exist_ok=True)
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.log_dir)))
 
+    def cleanup_old_logs(self, force: bool = False) -> None:
+        self.log_dir.mkdir(parents=True, exist_ok=True)
+        if force:
+            answer = QMessageBox.question(
+                self,
+                APP_NAME,
+                "Удалить все старые журналы? Текущий журнал загрузки будет сохранён.",
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+            cutoff = time.time() + 1
+        else:
+            if not self.cleanup_logs_check.isChecked():
+                return
+            days = int(self.log_retention_combo.currentData() or 0)
+            if days <= 0:
+                return
+            cutoff = time.time() - days * 86400
+        removed = 0
+        for path in self.log_dir.glob("*.log"):
+            if self.log_path is not None and path == self.log_path:
+                continue
+            try:
+                if path.stat().st_mtime < cutoff:
+                    path.unlink()
+                    removed += 1
+            except OSError:
+                continue
+        if force:
+            QMessageBox.information(self, APP_NAME, f"Удалено журналов: {removed}.")
+
+    def setup_tray(self) -> None:
+        required = self.tray_check.isChecked() or self.notifications_check.isChecked()
+        if not QSystemTrayIcon.isSystemTrayAvailable():
+            return
+        if self.tray_icon is None:
+            icon = self.windowIcon()
+            if icon.isNull():
+                icon = self.style().standardIcon(QStyle.StandardPixmap.SP_DriveHDIcon)
+                self.setWindowIcon(icon)
+            tray = QSystemTrayIcon(icon, self)
+            tray.setToolTip(f"{APP_NAME} · {__version__}")
+            menu = QMenu(self)
+            show_action = QAction("Открыть Neon Drive", self)
+            show_action.triggered.connect(self.show_from_tray)
+            destination_action = QAction("Открыть папку загрузки", self)
+            destination_action.triggered.connect(self.open_destination_folder)
+            pause_action = QAction("Пауза / продолжить", self)
+            pause_action.triggered.connect(self.toggle_pause)
+            exit_action = QAction("Выйти", self)
+            exit_action.triggered.connect(self.exit_from_tray)
+            menu.addAction(show_action)
+            menu.addAction(destination_action)
+            menu.addAction(pause_action)
+            menu.addSeparator()
+            menu.addAction(exit_action)
+            tray.setContextMenu(menu)
+            tray.activated.connect(self.tray_activated)
+            self.tray_icon = tray
+        if required:
+            self.tray_icon.show()
+        else:
+            self.tray_icon.hide()
+
+    def tray_activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
+        if reason in (
+            QSystemTrayIcon.ActivationReason.Trigger,
+            QSystemTrayIcon.ActivationReason.DoubleClick,
+        ):
+            self.show_from_tray()
+
+    def show_from_tray(self) -> None:
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
+
+    def exit_from_tray(self) -> None:
+        if self.running:
+            answer = QMessageBox.question(
+                self, APP_NAME, "Остановить загрузки и выйти из приложения?"
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+            self.stop_now()
+        self.force_exit = True
+        QApplication.instance().quit()
+
+    def notify(self, title: str, message: str) -> None:
+        if not self.notifications_check.isChecked():
+            return
+        self.setup_tray()
+        if self.tray_icon is not None:
+            self.tray_icon.showMessage(
+                title,
+                message,
+                QSystemTrayIcon.MessageIcon.Information,
+                4500,
+            )
+
     def auto_check_updates(self) -> None:
-        if self.auto_update_check.isChecked():
+        if self.update_mode_combo.currentData() == "automatic":
             self.check_updates(silent=True)
 
     def check_updates(self, silent: bool = False) -> None:
@@ -1115,6 +1720,51 @@ class MainWindow(QMainWindow):
     def install_update(self) -> None:
         if not self.latest_update or not self.latest_update.get("available"):
             return
+        self.install_release(self.latest_update)
+
+    def load_release_history(self) -> None:
+        if self.release_history_thread and self.release_history_thread.isRunning():
+            return
+        self.load_releases_button.setEnabled(False)
+        self.install_selected_button.setEnabled(False)
+        self.update_status.setText("Загрузка списка GitHub Releases…")
+        thread = ReleaseHistoryThread(self)
+        self.release_history_thread = thread
+        thread.succeeded.connect(self.release_history_succeeded)
+        thread.failed.connect(self.release_history_failed)
+        thread.finished.connect(lambda: self.load_releases_button.setEnabled(True))
+        thread.start()
+
+    def release_history_succeeded(self, releases: list[dict]) -> None:
+        self.release_history = releases
+        self.release_combo.clear()
+        for index, release in enumerate(releases):
+            published = str(release.get("published_at", ""))[:10]
+            marker = " · установлена" if release.get("version") == __version__ else ""
+            self.release_combo.addItem(
+                f"{release.get('tag', release.get('version'))} · {published}{marker}", index
+            )
+        self.install_selected_button.setEnabled(bool(releases))
+        self.update_status.setText(
+            f"Найдено версий: {len(releases)} · текущая версия {__version__}"
+        )
+
+    def release_history_failed(self, message: str) -> None:
+        self.update_status.setText("Не удалось получить список версий")
+        self.append_log(f"Список версий: {message}\n")
+        QMessageBox.warning(self, APP_NAME, f"Не удалось получить список версий:\n{message}")
+
+    def install_selected_release(self) -> None:
+        index = self.release_combo.currentData()
+        if index is None:
+            return
+        try:
+            release = self.release_history[int(index)]
+        except (IndexError, TypeError, ValueError):
+            return
+        self.install_release(release)
+
+    def install_release(self, release: dict) -> None:
         if self.running:
             QMessageBox.warning(
                 self,
@@ -1125,14 +1775,15 @@ class MainWindow(QMainWindow):
         answer = QMessageBox.question(
             self,
             APP_NAME,
-            f"Скачать версию {self.latest_update['version']} и перезапустить приложение?",
+            f"Скачать версию {release['version']} и перезапустить приложение?",
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
         self.install_update_button.setEnabled(False)
+        self.install_selected_button.setEnabled(False)
         self.check_update_button.setEnabled(False)
         self.update_status.setText("Скачивание обновления…")
-        thread = UpdateDownloadThread(self.latest_update, self)
+        thread = UpdateDownloadThread(release, self)
         self.update_download_thread = thread
         thread.succeeded.connect(self.update_download_succeeded)
         thread.failed.connect(self.update_download_failed)
@@ -1149,12 +1800,26 @@ class MainWindow(QMainWindow):
 
     def update_download_failed(self, message: str) -> None:
         self.install_update_button.setEnabled(True)
+        self.install_selected_button.setEnabled(bool(self.release_history))
         self.check_update_button.setEnabled(True)
         self.update_status.setText("Ошибка загрузки обновления")
         self.append_log(f"Загрузка обновления: {message}\n")
         QMessageBox.critical(self, APP_NAME, f"Не удалось установить обновление:\n{message}")
 
     def closeEvent(self, event) -> None:  # noqa: N802
+        self.persist_settings()
+        if self.force_exit:
+            event.accept()
+            return
+        if (
+            self.tray_check.isChecked()
+            and self.continue_in_tray_check.isChecked()
+            and QSystemTrayIcon.isSystemTrayAvailable()
+        ):
+            self.hide()
+            self.notify(APP_NAME, "Приложение продолжает работать в фоновом режиме.")
+            event.ignore()
+            return
         if self.workers:
             answer = QMessageBox.question(self, APP_NAME, "Остановить загрузки и закрыть приложение?")
             if answer != QMessageBox.StandardButton.Yes:
@@ -1162,6 +1827,16 @@ class MainWindow(QMainWindow):
                 return
             self.stop_now()
         event.accept()
+
+    def changeEvent(self, event) -> None:  # noqa: N802
+        super().changeEvent(event)
+        if (
+            event.type() == QEvent.Type.WindowStateChange
+            and self.isMinimized()
+            and self.tray_check.isChecked()
+            and QSystemTrayIcon.isSystemTrayAvailable()
+        ):
+            QTimer.singleShot(0, self.hide)
 
 
 def main() -> int:
