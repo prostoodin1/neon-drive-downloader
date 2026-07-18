@@ -19,6 +19,7 @@ from . import __version__
 REPOSITORY = "prostoodin1/neon-drive-downloader"
 ASSET_NAME = "NeonDriveDownloader.exe"
 API_URL = f"https://api.github.com/repos/{REPOSITORY}/releases/latest"
+RELEASES_URL = f"https://api.github.com/repos/{REPOSITORY}/releases?per_page=20"
 
 
 def version_tuple(value: str) -> tuple[int, ...]:
@@ -38,25 +39,24 @@ def gh_path() -> str | None:
     return next((str(path) for path in candidates if path.is_file()), None)
 
 
-def _public_release() -> dict:
+def _public_json(url: str) -> object:
     request = urllib.request.Request(
-        API_URL,
+        url,
         headers={"Accept": "application/vnd.github+json", "User-Agent": "NeonDriveDownloader"},
     )
     with urllib.request.urlopen(request, timeout=15) as response:
         data = json.loads(response.read().decode("utf-8"))
-    data["download_method"] = "public"
     return data
 
 
-def _private_release() -> dict:
+def _private_json(endpoint: str) -> object:
     executable = gh_path()
     if not executable:
         raise RuntimeError(
             "Приватный репозиторий требует GitHub CLI. Установите gh и выполните gh auth login."
         )
     result = subprocess.run(
-        [executable, "api", f"repos/{REPOSITORY}/releases/latest"],
+        [executable, "api", endpoint],
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -67,33 +67,59 @@ def _private_release() -> dict:
     if result.returncode != 0:
         message = result.stderr.strip() or result.stdout.strip() or "GitHub API недоступен"
         raise RuntimeError(message)
-    data = json.loads(result.stdout)
-    data["download_method"] = "gh"
-    return data
+    return json.loads(result.stdout)
 
 
-def latest_release() -> dict:
+def _release_data(latest: bool = True) -> tuple[object, str]:
+    url = API_URL if latest else RELEASES_URL
+    endpoint = f"repos/{REPOSITORY}/releases/latest" if latest else f"repos/{REPOSITORY}/releases?per_page=20"
     try:
-        data = _public_release()
+        return _public_json(url), "public"
     except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, json.JSONDecodeError):
-        data = _private_release()
+        return _private_json(endpoint), "gh"
+
+
+def _normalize_release(data: dict, method: str) -> dict:
     tag = str(data.get("tag_name", ""))
     assets = data.get("assets") or []
     asset = next((item for item in assets if item.get("name") == ASSET_NAME), None)
-    if not tag:
-        raise RuntimeError("Последний GitHub Release не содержит номера версии.")
-    if not asset:
-        raise RuntimeError(f"В релизе {tag} не найден файл {ASSET_NAME}.")
+    if not tag or not asset:
+        raise RuntimeError(f"Релиз {tag or 'без версии'} не содержит {ASSET_NAME}.")
     return {
         "tag": tag,
         "version": tag.lstrip("vV"),
         "name": data.get("name") or tag,
         "notes": data.get("body") or "",
+        "published_at": data.get("published_at") or data.get("created_at") or "",
         "asset_url": asset.get("browser_download_url") or "",
-        "method": data.get("download_method", "public"),
+        "method": method,
         "available": version_tuple(tag) > version_tuple(__version__),
         "current_version": __version__,
     }
+
+
+def latest_release() -> dict:
+    data, method = _release_data(latest=True)
+    if not isinstance(data, dict):
+        raise RuntimeError("GitHub вернул некорректные данные последнего релиза.")
+    return _normalize_release(data, method)
+
+
+def release_history() -> list[dict]:
+    data, method = _release_data(latest=False)
+    if not isinstance(data, list):
+        raise RuntimeError("GitHub вернул некорректный список релизов.")
+    releases: list[dict] = []
+    for item in data:
+        if not isinstance(item, dict) or item.get("draft"):
+            continue
+        try:
+            releases.append(_normalize_release(item, method))
+        except RuntimeError:
+            continue
+    if not releases:
+        raise RuntimeError("Подходящие GitHub Releases не найдены.")
+    return releases
 
 
 def download_release(release: dict) -> Path:
@@ -217,5 +243,16 @@ class UpdateDownloadThread(QThread):
     def run(self) -> None:
         try:
             self.succeeded.emit(str(download_release(self.release)))
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
+class ReleaseHistoryThread(QThread):
+    succeeded = Signal(object)
+    failed = Signal(str)
+
+    def run(self) -> None:
+        try:
+            self.succeeded.emit(release_history())
         except Exception as exc:
             self.failed.emit(str(exc))
