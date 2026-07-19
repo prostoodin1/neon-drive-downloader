@@ -69,6 +69,7 @@ from PySide6.QtWidgets import (
 from . import __version__
 from .updater import (
     REPOSITORY,
+    SETUP_ASSET_NAME,
     ReleaseHistoryThread,
     UpdateCheckThread,
     UpdateDownloadThread,
@@ -78,6 +79,12 @@ from .updater import (
 
 APP_NAME = "Neon Drive Downloader"
 MAX_CONCURRENT_DOWNLOADS = 10
+MAX_DIRECTORY_THREADS = 16
+COPY_PROFILE_NAMES = {
+    "stable": "Надёжный · докачка после обрыва",
+    "optimized": "Ускоренный · многопоточные папки с докачкой",
+    "maximum": "Максимальная скорость · без докачки текущего файла",
+}
 PERCENT_RE = re.compile(r"(?<!\d)(?P<pct>\d{1,3}(?:[.,]\d+)?)%")
 
 
@@ -152,6 +159,41 @@ def destination_collisions(sources: list[str], destination: Path) -> dict[Path, 
             targets[key] = (target, [])
         targets[key][1].append(source)
     return {target: items for target, items in targets.values() if len(items) > 1}
+
+
+def robocopy_arguments(
+    source: str,
+    destination: Path,
+    profile: str = "optimized",
+    directory_threads: int = 8,
+) -> tuple[list[str], Path]:
+    """Build the real Robocopy command for the selected performance profile."""
+    path = Path(source)
+    profile = profile if profile in COPY_PROFILE_NAMES else "optimized"
+    retry_count, retry_wait = (8, 2) if profile == "maximum" else (20, 10)
+    common = [
+        "/J",
+        f"/R:{retry_count}",
+        f"/W:{retry_wait}",
+        "/COPY:DAT",
+        "/DCOPY:DAT",
+        "/XJ",
+        "/V",
+        "/FP",
+        "/TS",
+        "/BYTES",
+        "/ETA",
+    ]
+    if profile != "maximum":
+        common.insert(0, "/Z")
+    target = copy_target_path(path, destination)
+    if path.is_dir():
+        folder_options = ["/E"]
+        if profile in ("optimized", "maximum"):
+            threads = max(2, min(MAX_DIRECTORY_THREADS, int(directory_threads)))
+            folder_options.append(f"/MT:{threads}")
+        return [str(path), str(target), *folder_options, *common], target
+    return [str(path.parent), str(destination), path.name, *common], target
 
 
 def format_seconds(seconds: float | None) -> str:
@@ -240,7 +282,13 @@ class Downloader(QProcess):
         self._active_file_path = ""
         self._pending_file_bytes: int | None = None
 
-    def start_item(self, source: str, destination: Path) -> None:
+    def start_item(
+        self,
+        source: str,
+        destination: Path,
+        profile: str = "optimized",
+        directory_threads: int = 8,
+    ) -> None:
         self.current = source
         self.destination = destination
         self._done_emitted = False
@@ -251,20 +299,18 @@ class Downloader(QProcess):
         self._active_file_path = ""
         self._pending_file_bytes = None
         self.buffer = ""
-        path = Path(source)
-        common = [
-            "/Z", "/J", "/R:20", "/W:10", "/COPY:DAT", "/DCOPY:DAT",
-            "/XJ", "/V", "/FP", "/TS", "/BYTES", "/ETA",
-        ]
-        if path.is_dir():
-            target = copy_target_path(path, destination)
-            self.expected_target = target
-            args = [str(path), str(target), "/E", *common]
-        else:
-            self.expected_target = copy_target_path(path, destination)
-            args = [str(path.parent), str(destination), path.name, *common]
+        args, self.expected_target = robocopy_arguments(
+            source,
+            destination,
+            profile,
+            directory_threads,
+        )
         command = subprocess.list2cmdline(["robocopy.exe", *args])
-        self.log.emit(f"\n▶ ИСХОДНИК: {source}\n▶ НАЗНАЧЕНИЕ: {self.expected_target}\n▶ КОМАНДА: {command}\n")
+        profile_name = COPY_PROFILE_NAMES.get(profile, COPY_PROFILE_NAMES["optimized"])
+        self.log.emit(
+            f"\n▶ ИСХОДНИК: {source}\n▶ НАЗНАЧЕНИЕ: {self.expected_target}\n"
+            f"▶ ПРОФИЛЬ: {profile_name}\n▶ КОМАНДА: {command}\n"
+        )
         self.command_started.emit(command)
         env = QProcessEnvironment.systemEnvironment()
         env.insert("PYTHONIOENCODING", "utf-8")
@@ -809,6 +855,33 @@ class MainWindow(QMainWindow):
         )
         concurrency_box.addWidget(self.concurrency_spin)
         speed_box.addWidget(self.concurrency_controls)
+
+        speed_box.addWidget(QLabel("Профиль производительности"))
+        self.copy_profile_combo = QComboBox()
+        self.copy_profile_combo.addItem("Надёжный · /Z и полная докачка", "stable")
+        self.copy_profile_combo.addItem("Ускоренный · /Z + многопоточность", "optimized")
+        self.copy_profile_combo.addItem("Максимальная скорость · без /Z", "maximum")
+        speed_box.addWidget(self.copy_profile_combo)
+        self.directory_threads_controls = QWidget()
+        directory_threads_box = QVBoxLayout(self.directory_threads_controls)
+        directory_threads_box.setContentsMargins(0, 2, 0, 2)
+        directory_threads_box.setSpacing(6)
+        self.directory_threads_label = QLabel("Потоков внутри одной папки: 8")
+        directory_threads_box.addWidget(self.directory_threads_label)
+        self.directory_threads_slider = QSlider(Qt.Orientation.Horizontal)
+        self.directory_threads_slider.setRange(2, MAX_DIRECTORY_THREADS)
+        self.directory_threads_slider.setValue(8)
+        self.directory_threads_slider.valueChanged.connect(
+            lambda value: self.directory_threads_label.setText(
+                f"Потоков внутри одной папки: {value}"
+            )
+        )
+        directory_threads_box.addWidget(self.directory_threads_slider)
+        speed_box.addWidget(self.directory_threads_controls)
+        self.performance_note = QLabel()
+        self.performance_note.setObjectName("settingDescription")
+        self.performance_note.setWordWrap(True)
+        speed_box.addWidget(self.performance_note)
         self.auto_start_check = self.add_setting_toggle(
             speed_box, "Начинать загрузку сразу после добавления файлов"
         )
@@ -950,24 +1023,9 @@ class MainWindow(QMainWindow):
         motion_box.addWidget(motion_note)
         grid.addWidget(motion_card, 0, 1)
 
-        preview_card, preview_box = self.settings_section("ПРЕДПРОСМОТР")
-        preview_buttons = QHBoxLayout()
-        preview_buttons.addWidget(QPushButton("ОБЫЧНАЯ КНОПКА"))
-        preview_primary = QPushButton("ГЛАВНАЯ КНОПКА")
-        preview_primary.setObjectName("primarySmall")
-        preview_buttons.addWidget(preview_primary)
-        preview_danger = QPushButton("ОСТАНОВИТЬ")
-        preview_danger.setObjectName("danger")
-        preview_buttons.addWidget(preview_danger)
-        preview_box.addLayout(preview_buttons)
-        preview_progress = AnimatedProgressBar()
-        preview_progress.setRange(0, 1000)
-        preview_progress.setValue(680)
-        preview_progress.setTextVisible(False)
-        preview_box.addWidget(preview_progress)
-        grid.addWidget(preview_card, 1, 0, 1, 2)
         grid.setColumnStretch(0, 1)
         grid.setColumnStretch(1, 1)
+        grid.setRowStretch(1, 1)
         layout.addWidget(self.settings_scroll(grid), 1)
         return page
 
@@ -1040,17 +1098,20 @@ class MainWindow(QMainWindow):
         themes = {
             "oled": {
                 "background": "#000000", "card": "#080b0d", "input": "#020405",
-                "text": "#dcebed", "muted": "#71868b", "border": "#17282d",
+                "text": "#f1fcff", "muted": "#a6b9be", "disabled": "#526469",
+                "border": "#17282d",
                 "button": "#10171a", "track": "#132024", "terminal": "#020405",
             },
             "dark": {
                 "background": "#14181d", "card": "#1c2228", "input": "#10151a",
-                "text": "#e7edf0", "muted": "#93a1a8", "border": "#34414a",
+                "text": "#f3f7f9", "muted": "#b0bdc3", "disabled": "#69767d",
+                "border": "#34414a",
                 "button": "#263039", "track": "#303b43", "terminal": "#0c1115",
             },
             "light": {
                 "background": "#eef2f5", "card": "#ffffff", "input": "#f8fafb",
-                "text": "#172127", "muted": "#66757d", "border": "#cdd8de",
+                "text": "#11191e", "muted": "#52626a", "disabled": "#9aa6ac",
+                "border": "#cdd8de",
                 "button": "#e6edf1", "track": "#d9e3e8", "terminal": "#101820",
             },
         }
@@ -1073,9 +1134,15 @@ class MainWindow(QMainWindow):
             if all_buttons else
             f"background: {colors['button']}; color: {colors['text']}; border-color: {colors['border']};"
         )
-        self.setStyleSheet(f"""
+        stylesheet = f"""
             * {{ font-family: 'Segoe UI'; color: {colors['text']}; }}
             #root {{ background: {colors['background']}; }}
+            QDialog, QMessageBox {{ background-color: {colors['background']}; }}
+            QMessageBox QLabel {{ color: {colors['text']}; font-size: 13px; min-width: 270px; }}
+            QMessageBox QPushButton {{ min-width: 78px; }}
+            QMenu {{ background: {colors['card']}; color: {colors['text']}; border: 1px solid {colors['border']}; }}
+            QMenu::item:selected {{ background: {accent}; color: {accent_text}; }}
+            QToolTip {{ background: {colors['card']}; color: {colors['text']}; border: 1px solid {accent}; padding: 5px; }}
             #title, #brandAccent {{ font-size: 28px; font-weight: 800; letter-spacing: 2px; }}
             #brandAccent {{ color: {accent}; }}
             #versionBadge {{ color: {colors['muted']}; font-size: 15px; font-weight: 700; padding-top: 7px; }}
@@ -1092,9 +1159,9 @@ class MainWindow(QMainWindow):
             QPushButton {{ {general_button} border-width: 1px; border-style: solid; border-radius: 8px; padding: 9px 13px; font-weight: 700; }}
             QPushButton:hover {{ border-color: {accent_hover}; color: {accent if not all_buttons else accent_text}; }}
             QPushButton:pressed {{ background: {accent_color.darker(135).name()}; color: {accent_text}; }}
-            QPushButton:disabled {{ color: {colors['muted']}; border-color: {colors['border']}; background: {colors['track']}; }}
-            QLabel:disabled, QCheckBox:disabled, QRadioButton:disabled {{ color: {colors['muted']}; }}
-            QPlainTextEdit:disabled, QLineEdit:disabled, QComboBox:disabled {{ color: {colors['muted']}; background: {colors['track']}; border-color: {colors['border']}; }}
+            QPushButton:disabled {{ color: {colors['disabled']}; border-color: {colors['border']}; background: {colors['track']}; }}
+            QLabel:disabled, QCheckBox:disabled, QRadioButton:disabled {{ color: {colors['disabled']}; }}
+            QPlainTextEdit:disabled, QLineEdit:disabled, QComboBox:disabled {{ color: {colors['disabled']}; background: {colors['track']}; border-color: {colors['border']}; }}
             #pathButton, #folderLink {{ text-align: left; color: {accent}; background: transparent; border: 0; padding: 2px; font-weight: 600; }}
             #pathButton:hover, #folderLink:hover {{ color: {accent_hover}; text-decoration: underline; }}
             #tilePathButton {{ text-align: left; color: {accent}; background: {colors['input']}; border-color: {colors['border']}; }}
@@ -1104,7 +1171,7 @@ class MainWindow(QMainWindow):
             #primary, #primarySmall {{ background: {accent}; color: {accent_text}; border: 1px solid {accent_hover}; border-radius: 10px; letter-spacing: 1px; }}
             #primary {{ font-size: 14px; }}
             #primary:hover, #primarySmall:hover {{ background: {accent_hover}; color: {accent_text}; }}
-            #primary:disabled {{ background: {colors['track']}; color: {colors['muted']}; border-color: {colors['border']}; }}
+            #primary:disabled {{ background: {colors['track']}; color: {colors['disabled']}; border-color: {colors['border']}; }}
             QProgressBar {{ background: {colors['track']}; border: 0; border-radius: 4px; height: 8px; }}
             QProgressBar::chunk {{ background: {accent}; border-radius: 4px; }}
             #progressText {{ font-size: 12px; font-weight: 700; }}
@@ -1129,11 +1196,16 @@ class MainWindow(QMainWindow):
             QSlider::groove:horizontal {{ background: {colors['track']}; height: 5px; border-radius: 2px; }}
             QSlider::sub-page:horizontal {{ background: {accent}; border-radius: 2px; }}
             QSlider::handle:horizontal {{ background: {accent_hover}; border: 2px solid {colors['card']}; width: 17px; margin: -7px 0; border-radius: 10px; }}
-            QSlider::sub-page:horizontal:disabled, QSlider::handle:horizontal:disabled {{ background: {colors['muted']}; }}
+            QSlider::sub-page:horizontal:disabled, QSlider::handle:horizontal:disabled {{ background: {colors['disabled']}; }}
             QScrollArea, QScrollArea > QWidget > QWidget {{ background: transparent; }}
             QScrollBar:vertical {{ background: transparent; width: 8px; }}
             QScrollBar::handle:vertical {{ background: {colors['border']}; border-radius: 4px; min-height: 30px; }}
-        """)
+        """
+        application = QApplication.instance()
+        if application is not None:
+            application.setStyleSheet(stylesheet)
+        else:
+            self.setStyleSheet(stylesheet)
         self.ring.set_colors(colors["track"], accent, colors["text"])
         animations = not hasattr(self, "animations_check") or self.animations_check.isChecked()
         self.progress.animations_enabled = animations
@@ -1150,6 +1222,10 @@ class MainWindow(QMainWindow):
             "download_mode", "all" if old_parallel else "sequential"
         ))
         self.concurrency_spin.setValue(self.settings.value("concurrency", 3, type=int))
+        select(self.copy_profile_combo, self.settings.value("copy_profile", "optimized"))
+        self.directory_threads_slider.setValue(
+            self.settings.value("directory_threads", 8, type=int)
+        )
         select(self.file_display_combo, self.settings.value("file_display", "list"))
         self.compact_check.setChecked(self.settings.value("compact_rows", False, type=bool))
         self.show_source_links_check.setChecked(
@@ -1195,6 +1271,8 @@ class MainWindow(QMainWindow):
         for signal in (
             self.download_mode_combo.currentIndexChanged,
             self.concurrency_spin.valueChanged,
+            self.copy_profile_combo.currentIndexChanged,
+            self.directory_threads_slider.valueChanged,
             self.file_display_combo.currentIndexChanged,
             self.compact_check.stateChanged,
             self.show_source_links_check.stateChanged,
@@ -1222,6 +1300,8 @@ class MainWindow(QMainWindow):
     def persist_settings(self) -> None:
         self.settings.setValue("download_mode", self.download_mode_combo.currentData())
         self.settings.setValue("concurrency", self.concurrency_spin.value())
+        self.settings.setValue("copy_profile", self.copy_profile_combo.currentData())
+        self.settings.setValue("directory_threads", self.directory_threads_slider.value())
         self.settings.setValue("file_display", self.file_display_combo.currentData())
         self.settings.setValue("compact_rows", self.compact_check.isChecked())
         self.settings.setValue("show_source_links", self.show_source_links_check.isChecked())
@@ -1264,6 +1344,27 @@ class MainWindow(QMainWindow):
         self.concurrency_controls.setEnabled(limited)
         self.concurrency_controls.setToolTip(
             "" if limited else "Число файлов задаётся только в ограниченном режиме."
+        )
+        profile = str(self.copy_profile_combo.currentData() or "optimized")
+        profile_notes = {
+            "stable": (
+                "Robocopy использует /Z: оборванный файл продолжается с сохранённого места. "
+                "Внутри одной папки файлы копируются последовательно."
+            ),
+            "optimized": (
+                "Рекомендуемый режим: /Z сохраняет докачку, а /MT реально копирует несколько "
+                "файлов выбранной папки параллельно. Для одного большого файла остаётся /J."
+            ),
+            "maximum": (
+                "Максимальная скорость: /MT для папок и короткие повторы. /Z отключён, поэтому "
+                "после обрыва текущий незавершённый файл может начаться заново."
+            ),
+        }
+        self.performance_note.setText(profile_notes.get(profile, profile_notes["optimized"]))
+        threaded_profile = profile in ("optimized", "maximum") and not self.running
+        self.directory_threads_controls.setEnabled(threaded_profile)
+        self.directory_threads_controls.setToolTip(
+            "" if threaded_profile else "Число внутренних потоков используется в ускоренных профилях."
         )
         manual = self.update_mode_combo.currentData() == "manual"
         self.manual_update_card.setEnabled(manual)
@@ -1321,6 +1422,12 @@ class MainWindow(QMainWindow):
         if mode == "limited":
             return min(MAX_CONCURRENT_DOWNLOADS, max(1, self.concurrency_spin.value()))
         return min(MAX_CONCURRENT_DOWNLOADS, max(1, self.total_items))
+
+    def effective_directory_threads(self) -> int:
+        requested = self.directory_threads_slider.value()
+        # Keep total Robocopy worker pressure bounded when several folders run at once.
+        per_process_budget = max(2, 64 // max(1, self.max_concurrent_downloads()))
+        return max(2, min(MAX_DIRECTORY_THREADS, requested, per_process_budget))
 
     @Slot(int)
     def animate_tab(self, index: int) -> None:
@@ -1485,6 +1592,7 @@ class MainWindow(QMainWindow):
             self.clear_button,
             self.browse_button,
             self.download_mode_combo,
+            self.copy_profile_combo,
         ):
             widget.setEnabled(enabled)
         self.update_settings_visibility()
@@ -1579,6 +1687,10 @@ class MainWindow(QMainWindow):
             "all": f"Все доступные · до {MAX_CONCURRENT_DOWNLOADS} одновременно",
         }
         selected_mode = str(self.download_mode_combo.currentData())
+        selected_profile = str(self.copy_profile_combo.currentData() or "optimized")
+        profile_name = COPY_PROFILE_NAMES.get(selected_profile, COPY_PROFILE_NAMES["optimized"])
+        effective_threads = self.effective_directory_threads()
+        mt_status = str(effective_threads) if selected_profile in ("optimized", "maximum") else "выключен"
         self.footer_info.setText(mode_names.get(selected_mode, "Последовательно"))
         self.speed.setText("ИЗМЕРЕНИЕ…")
         self.eta.setText("ИЗМЕРЕНИЕ…")
@@ -1588,6 +1700,7 @@ class MainWindow(QMainWindow):
         self.append_log(
             f"{APP_NAME}\nСеанс: {datetime.now():%Y-%m-%d %H:%M:%S}\nRobocopy: {robocopy}\n"
             f"Режим: {mode}\nЛимит процессов: {self.max_concurrent_downloads()}\n"
+            f"Профиль: {profile_name}\nПотоков /MT на папку: {mt_status}\n"
             f"Очередь: {len(items)}\nОбщий объём: {human_size(self.total_bytes)}\n"
             f"Назначение: {destination}\nСвободно: {human_size(usage.free)} из {human_size(usage.total)}\n"
             f"Лог: {self.log_path}\n"
@@ -1633,7 +1746,12 @@ class MainWindow(QMainWindow):
         worker.progress.connect(self.on_progress)
         worker.item_done.connect(self.on_item_done)
         self.workers[source] = worker
-        worker.start_item(source, Path(self.destination.text()))
+        worker.start_item(
+            source,
+            Path(self.destination.text()),
+            str(self.copy_profile_combo.currentData() or "optimized"),
+            self.effective_directory_threads(),
+        )
 
     @Slot(str, float, float)
     def on_progress(self, source: str, percent: float, item_bytes: float) -> None:
@@ -2009,19 +2127,30 @@ class MainWindow(QMainWindow):
     def update_check_succeeded(self, release: dict, silent: bool) -> None:
         self.latest_update = release
         if release.get("available"):
-            self.update_status.setText(
-                f"Доступна версия {release['version']} · установлена {release['current_version']}"
-            )
+            if release.get("migration"):
+                self.update_status.setText(
+                    "Доступна стабильная установка без временной распаковки _MEI"
+                )
+                self.install_update_button.setText("УСТАНОВИТЬ СТАБИЛЬНУЮ ВЕРСИЮ")
+                message = (
+                    "Можно перейти с однофайловой версии на обычную установку. "
+                    "Это уберёт предупреждения об удалении _MEI."
+                )
+            else:
+                self.update_status.setText(
+                    f"Доступна версия {release['version']} · установлена {release['current_version']}"
+                )
+                self.install_update_button.setText("СКАЧАТЬ И УСТАНОВИТЬ")
+                message = (
+                    f"Доступно обновление {release['version']}.\n"
+                    "Нажмите «Скачать и установить» во вкладке обновлений."
+                )
             self.install_update_button.setVisible(True)
             if not silent:
-                QMessageBox.information(
-                    self,
-                    APP_NAME,
-                    f"Доступно обновление {release['version']}.\n"
-                    "Нажмите «Скачать и установить» в настройках.",
-                )
+                QMessageBox.information(self, APP_NAME, message)
         else:
             self.install_update_button.setVisible(False)
+            self.install_update_button.setText("СКАЧАТЬ И УСТАНОВИТЬ")
             self.update_status.setText(f"Установлена актуальная версия {__version__}")
             if not silent:
                 QMessageBox.information(self, APP_NAME, "У вас установлена актуальная версия.")
@@ -2087,10 +2216,15 @@ class MainWindow(QMainWindow):
                 "Сначала завершите или остановите текущие загрузки.",
             )
             return
+        action = (
+            "установить стабильную версию без временной распаковки"
+            if release.get("asset_name") == SETUP_ASSET_NAME
+            else "скачать и заменить текущий EXE"
+        )
         answer = QMessageBox.question(
             self,
             APP_NAME,
-            f"Скачать версию {release['version']} и перезапустить приложение?",
+            f"Версия {release['version']}: {action} и перезапустить приложение?",
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
@@ -2159,7 +2293,7 @@ def main() -> int:
     app.setApplicationName(APP_NAME)
     app.setOrganizationName("NeonTools")
     app.setStyle("Fusion")
-    icon_path = resource_path("assets/neon-drive.png")
+    icon_path = resource_path("assets/neon-drive-v2.png")
     if icon_path.is_file():
         app.setWindowIcon(QIcon(str(icon_path)))
 

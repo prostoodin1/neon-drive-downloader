@@ -8,6 +8,7 @@ build/
 dist/
 *.spec
 !NeonDriveDownloader.spec
+!NeonDriveDownloader-OneFile.spec
 
 # Local application and Codex artifacts
 outputs/

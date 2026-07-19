@@ -1,5 +1,17 @@
 # Changelog
 
+## 5.3.0
+
+- Increased contrast for all application text and fixed unreadable QMessageBox dialogs.
+- Added real Stable, Optimized, and Maximum Robocopy performance profiles.
+- Added configurable `/MT` directory threads with a bounded aggregate worker budget.
+- Verified multi-threaded folder copying and byte progress against a real Robocopy process.
+- Removed the unused Interface preview section.
+- Replaced the application artwork with a bold multi-resolution Windows icon.
+- Added an installed onedir build and Inno Setup package that never extracts to `_MEI` at runtime.
+- Kept a transitional onefile asset so v5.2 and earlier auto-updaters remain compatible.
+- Updated the updater to prefer silent installer-based upgrades and offer onefile migration.
+
 ## 5.2.0
 
 - Capped every parallel mode at 10 simultaneous Robocopy processes and fixed slot refilling.
