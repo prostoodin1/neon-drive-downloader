@@ -9,7 +9,7 @@ from pathlib import Path
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QSettings
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QLabel
 
 from neon_drive.app import (
     MAX_CONCURRENT_DOWNLOADS,
@@ -17,6 +17,7 @@ from neon_drive.app import (
     MainWindow,
     TaskInfo,
     destination_collisions,
+    robocopy_arguments,
 )
 
 
@@ -188,6 +189,49 @@ class StopAfterCurrentFileTests(unittest.TestCase):
         )
         self.assertEqual(len(collisions), 1)
         self.assertEqual(len(next(iter(collisions.values()))), 2)
+
+    def test_performance_profiles_change_real_robocopy_flags(self) -> None:
+        with tempfile.TemporaryDirectory() as source_dir, tempfile.TemporaryDirectory() as target_dir:
+            source = Path(source_dir)
+            destination = Path(target_dir)
+
+            optimized, _ = robocopy_arguments(
+                str(source), destination, "optimized", directory_threads=8
+            )
+            self.assertIn("/Z", optimized)
+            self.assertIn("/J", optimized)
+            self.assertIn("/MT:8", optimized)
+
+            stable, _ = robocopy_arguments(str(source), destination, "stable", 8)
+            self.assertIn("/Z", stable)
+            self.assertFalse(any(argument.startswith("/MT:") for argument in stable))
+
+            maximum, _ = robocopy_arguments(str(source), destination, "maximum", 12)
+            self.assertNotIn("/Z", maximum)
+            self.assertIn("/MT:12", maximum)
+            self.assertIn("/R:8", maximum)
+            self.assertIn("/W:2", maximum)
+
+    def test_interface_has_no_preview_and_dialog_style_is_global(self) -> None:
+        window = MainWindow()
+        headings = [label.text() for label in window.findChildren(QLabel)]
+        self.assertNotIn("ПРЕДПРОСМОТР", headings)
+        self.assertIn("QMessageBox QLabel", QApplication.instance().styleSheet())
+
+        window.copy_profile_combo.setCurrentIndex(
+            window.copy_profile_combo.findData("stable")
+        )
+        window.update_settings_visibility()
+        self.assertFalse(window.directory_threads_controls.isEnabled())
+
+        window.copy_profile_combo.setCurrentIndex(
+            window.copy_profile_combo.findData("optimized")
+        )
+        window.update_settings_visibility()
+        self.assertTrue(window.directory_threads_controls.isEnabled())
+
+        window.force_exit = True
+        window.close()
 
 
 if __name__ == "__main__":
