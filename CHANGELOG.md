@@ -1,5 +1,15 @@
 # Changelog
 
+## 5.2.0
+
+- Capped every parallel mode at 10 simultaneous Robocopy processes and fixed slot refilling.
+- Prevented parallel sources with colliding destination names from corrupting one another.
+- Kept mode-dependent settings visible while clearly dimming and disabling them.
+- Added a custom neon application icon for the window, tray, and Windows executable.
+- Moved onefile extraction and downloaded updates out of the shared Windows temp directory.
+- Updated the replacement helper to wait for PyInstaller onefile cleanup before swapping EXEs.
+- Upgraded the build bootloader to PyInstaller 6.21 and disabled UPX for more reliable startup.
+
 ## 5.1.0
 
 - Restored separate Download, Settings, Interface, and Updates tabs.

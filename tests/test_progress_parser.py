@@ -11,7 +11,13 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QSettings
 from PySide6.QtWidgets import QApplication
 
-from neon_drive.app import Downloader, MainWindow, TaskInfo
+from neon_drive.app import (
+    MAX_CONCURRENT_DOWNLOADS,
+    Downloader,
+    MainWindow,
+    TaskInfo,
+    destination_collisions,
+)
 
 
 class FakeWorker:
@@ -111,6 +117,77 @@ class StopAfterCurrentFileTests(unittest.TestCase):
         self.assertEqual(window.failed_items, 0)
         window.force_exit = True
         window.close()
+
+    def test_all_mode_never_starts_more_than_ten_workers(self) -> None:
+        window = MainWindow()
+        window.notifications_check.setChecked(False)
+        all_index = window.download_mode_combo.findData("all")
+        window.download_mode_combo.setCurrentIndex(all_index)
+        window.running = True
+        window.total_items = 12
+        window.queue = deque(f"file-{index}.bin" for index in range(12))
+        started: list[str] = []
+
+        def start_fake(source: str) -> None:
+            started.append(source)
+            window.workers[source] = FakeWorker()
+
+        window.start_task = start_fake
+        window.fill_worker_slots()
+
+        self.assertEqual(MAX_CONCURRENT_DOWNLOADS, 10)
+        self.assertEqual(len(started), 10)
+        self.assertEqual(len(window.workers), 10)
+        self.assertEqual(len(window.queue), 2)
+
+        window.workers.pop(started[0])
+        window.fill_worker_slots()
+        self.assertEqual(len(window.workers), 10)
+        self.assertEqual(len(window.queue), 1)
+
+        window.running = False
+        window.workers.clear()
+        window.force_exit = True
+        window.close()
+
+    def test_mode_specific_settings_are_visible_but_disabled(self) -> None:
+        window = MainWindow()
+        window.notifications_check.setChecked(False)
+
+        window.download_mode_combo.setCurrentIndex(
+            window.download_mode_combo.findData("sequential")
+        )
+        window.update_settings_visibility()
+        self.assertFalse(window.concurrency_controls.isEnabled())
+
+        window.download_mode_combo.setCurrentIndex(
+            window.download_mode_combo.findData("limited")
+        )
+        window.update_settings_visibility()
+        self.assertTrue(window.concurrency_controls.isEnabled())
+        self.assertEqual(window.concurrency_spin.maximum(), 10)
+
+        window.tray_check.setChecked(False)
+        window.cleanup_logs_check.setChecked(False)
+        window.update_mode_combo.setCurrentIndex(
+            window.update_mode_combo.findData("automatic")
+        )
+        window.update_settings_visibility()
+        self.assertFalse(window.continue_in_tray_check.setting_container.isEnabled())
+        self.assertFalse(window.log_retention_controls.isEnabled())
+        self.assertFalse(window.manual_update_card.isEnabled())
+        self.assertFalse(window.manual_update_card.isHidden())
+
+        window.force_exit = True
+        window.close()
+
+    def test_duplicate_destination_names_are_rejected_before_parallel_copy(self) -> None:
+        collisions = destination_collisions(
+            [r"G:\Drive A\movie.mkv", r"H:\Drive B\movie.mkv"],
+            Path(r"D:\Downloads"),
+        )
+        self.assertEqual(len(collisions), 1)
+        self.assertEqual(len(next(iter(collisions.values()))), 2)
 
 
 if __name__ == "__main__":
