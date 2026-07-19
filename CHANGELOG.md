@@ -1,5 +1,13 @@
 # Changelog
 
+## 5.1.0
+
+- Restored separate Download, Settings, Interface, and Updates tabs.
+- Rebuilt Settings to match the approved two-column layout.
+- Added source-link and destination-link visibility controls.
+- Fixed Stop After File to target one concrete active file and stop remaining jobs afterward.
+- Added staggered file-card, restart-banner, and status-change animations.
+
 ## 5.0.0
 
 - Moved all file presentation modes into Settings and placed file progress on Download.
