@@ -6,11 +6,11 @@ import re
 import shutil
 import subprocess
 import sys
-import tempfile
 import urllib.error
 import urllib.request
 from pathlib import Path
 
+import psutil
 from PySide6.QtCore import QThread, Signal
 
 from . import __version__
@@ -20,6 +20,11 @@ REPOSITORY = "prostoodin1/neon-drive-downloader"
 ASSET_NAME = "NeonDriveDownloader.exe"
 API_URL = f"https://api.github.com/repos/{REPOSITORY}/releases/latest"
 RELEASES_URL = f"https://api.github.com/repos/{REPOSITORY}/releases?per_page=20"
+
+
+def app_data_dir() -> Path:
+    base = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
+    return base / "NeonDriveDownloader"
 
 
 def version_tuple(value: str) -> tuple[int, ...]:
@@ -123,7 +128,7 @@ def release_history() -> list[dict]:
 
 
 def download_release(release: dict) -> Path:
-    update_dir = Path(tempfile.gettempdir()) / "NeonDriveDownloader-update"
+    update_dir = app_data_dir() / "updates"
     update_dir.mkdir(parents=True, exist_ok=True)
     destination = update_dir / ASSET_NAME
     destination.unlink(missing_ok=True)
@@ -166,11 +171,29 @@ def download_release(release: dict) -> Path:
     return destination
 
 
+def bootloader_parent_pid(current_executable: Path) -> int:
+    """Wait for the PyInstaller onefile parent so it can finish _MEI cleanup."""
+    current_pid = os.getpid()
+    try:
+        parent = psutil.Process(current_pid).parent()
+        if parent is None:
+            return current_pid
+        parent_executable = Path(parent.exe()).resolve()
+        if os.path.normcase(str(parent_executable)) == os.path.normcase(
+            str(current_executable.resolve())
+        ):
+            return parent.pid
+    except (OSError, psutil.Error):
+        pass
+    return current_pid
+
+
 def launch_replacement(downloaded: Path, current_executable: Path) -> None:
     if not getattr(sys, "frozen", False):
         raise RuntimeError("Автоустановка доступна только в собранной EXE-версии.")
     if not os.access(current_executable.parent, os.W_OK):
         raise RuntimeError("Нет прав на замену EXE в текущей папке.")
+    pid_to_wait = bootloader_parent_pid(current_executable)
     script = downloaded.parent / "apply-update.ps1"
     script.write_text(
         """param([string]$Source,[string]$Target,[int]$PidToWait,[string]$ScriptPath)
@@ -212,7 +235,7 @@ exit 1
             "-Target",
             str(current_executable),
             "-PidToWait",
-            str(os.getpid()),
+            str(pid_to_wait),
             "-ScriptPath",
             str(script),
         ],

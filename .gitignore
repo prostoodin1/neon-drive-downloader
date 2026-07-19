@@ -7,10 +7,12 @@ __pycache__/
 build/
 dist/
 *.spec
+!NeonDriveDownloader.spec
 
 # Local application and Codex artifacts
 outputs/
 work/
+tmp/
 .agents/
 .codex/
 *.log

@@ -26,7 +26,16 @@ from PySide6.QtCore import (
     Signal,
     Slot,
 )
-from PySide6.QtGui import QAction, QColor, QDesktopServices, QFont, QPainter, QPen, QTextCursor
+from PySide6.QtGui import (
+    QAction,
+    QColor,
+    QDesktopServices,
+    QFont,
+    QIcon,
+    QPainter,
+    QPen,
+    QTextCursor,
+)
 from PySide6.QtWidgets import (
     QApplication,
     QButtonGroup,
@@ -68,6 +77,7 @@ from .updater import (
 
 
 APP_NAME = "Neon Drive Downloader"
+MAX_CONCURRENT_DOWNLOADS = 10
 PERCENT_RE = re.compile(r"(?<!\d)(?P<pct>\d{1,3}(?:[.,]\d+)?)%")
 
 
@@ -125,6 +135,23 @@ ROBOCOPY_CODES = {
 def resource_path(name: str) -> Path:
     base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent.parent))
     return base / name
+
+
+def copy_target_path(source: str | Path, destination: Path) -> Path:
+    path = Path(source)
+    target_name = path.name or path.drive.rstrip(":\\/") or "drive"
+    return destination / target_name
+
+
+def destination_collisions(sources: list[str], destination: Path) -> dict[Path, list[str]]:
+    targets: dict[str, tuple[Path, list[str]]] = {}
+    for source in sources:
+        target = copy_target_path(source, destination)
+        key = os.path.normcase(os.path.normpath(str(target)))
+        if key not in targets:
+            targets[key] = (target, [])
+        targets[key][1].append(source)
+    return {target: items for target, items in targets.values() if len(items) > 1}
 
 
 def format_seconds(seconds: float | None) -> str:
@@ -230,11 +257,11 @@ class Downloader(QProcess):
             "/XJ", "/V", "/FP", "/TS", "/BYTES", "/ETA",
         ]
         if path.is_dir():
-            target = destination / (path.name or path.drive.rstrip(":\\"))
+            target = copy_target_path(path, destination)
             self.expected_target = target
             args = [str(path), str(target), "/E", *common]
         else:
-            self.expected_target = destination / path.name
+            self.expected_target = copy_target_path(path, destination)
             args = [str(path.parent), str(destination), path.name, *common]
         command = subprocess.list2cmdline(["robocopy.exe", *args])
         self.log.emit(f"\n▶ ИСХОДНИК: {source}\n▶ НАЗНАЧЕНИЕ: {self.expected_target}\n▶ КОМАНДА: {command}\n")
@@ -403,8 +430,7 @@ class FileRow(QFrame):
         layout.addWidget(self.info)
 
     def target_path(self) -> Path:
-        path = Path(self.source)
-        return self.destination / (path.name or path.drive.rstrip(":\\"))
+        return copy_target_path(self.source, self.destination)
 
     @staticmethod
     def reveal(path: Path) -> None:
@@ -655,6 +681,8 @@ class MainWindow(QMainWindow):
         self.after_button.clicked.connect(self.toggle_stop_after)
         self.stop_button = QPushButton("СТОП", objectName="danger")
         self.stop_button.clicked.connect(self.stop_now)
+        for button in (self.pause_button, self.after_button, self.stop_button):
+            button.setEnabled(False)
         open_logs = QPushButton("ЛОГИ")
         open_logs.clicked.connect(self.open_logs)
         for button in (self.pause_button, self.after_button, self.stop_button, open_logs):
@@ -727,7 +755,15 @@ class MainWindow(QMainWindow):
         row.addWidget(checkbox, 0, Qt.AlignmentFlag.AlignTop)
         row.addWidget(label, 1)
         box.addWidget(container)
+        checkbox.setting_container = container
+        checkbox.setting_label = label
         return checkbox
+
+    @staticmethod
+    def set_toggle_available(checkbox: QCheckBox, available: bool, reason: str = "") -> None:
+        container = getattr(checkbox, "setting_container", checkbox)
+        container.setEnabled(available)
+        container.setToolTip("" if available else reason)
 
     @staticmethod
     def settings_scroll(grid: QGridLayout) -> QScrollArea:
@@ -756,23 +792,29 @@ class MainWindow(QMainWindow):
         self.download_mode_combo = QComboBox()
         self.download_mode_combo.addItem("Один файл за другим · стабильнее", "sequential")
         self.download_mode_combo.addItem("Ограничить число одновременных", "limited")
-        self.download_mode_combo.addItem("Все файлы одновременно · максимум", "all")
+        self.download_mode_combo.addItem("Все доступные · не более 10 одновременно", "all")
         speed_box.addWidget(self.download_mode_combo)
+
+        self.concurrency_controls = QWidget()
+        concurrency_box = QVBoxLayout(self.concurrency_controls)
+        concurrency_box.setContentsMargins(0, 2, 0, 2)
+        concurrency_box.setSpacing(6)
         self.concurrency_label = QLabel("Одновременных файлов: 3")
-        speed_box.addWidget(self.concurrency_label)
+        concurrency_box.addWidget(self.concurrency_label)
         self.concurrency_spin = QSlider(Qt.Orientation.Horizontal)
-        self.concurrency_spin.setRange(2, 8)
+        self.concurrency_spin.setRange(2, MAX_CONCURRENT_DOWNLOADS)
         self.concurrency_spin.setValue(3)
         self.concurrency_spin.valueChanged.connect(
             lambda value: self.concurrency_label.setText(f"Одновременных файлов: {value}")
         )
-        speed_box.addWidget(self.concurrency_spin)
+        concurrency_box.addWidget(self.concurrency_spin)
+        speed_box.addWidget(self.concurrency_controls)
         self.auto_start_check = self.add_setting_toggle(
             speed_box, "Начинать загрузку сразу после добавления файлов"
         )
         speed_note = QLabel(
             "Если папка назначения не выбрана, приложение сначала откроет окно выбора. "
-            "Для больших файлов рекомендуется 2–3 одновременные загрузки."
+            "Жёсткий предел — 10 файлов. Для больших файлов рекомендуется 2–3 одновременные загрузки."
         )
         speed_note.setObjectName("settingDescription")
         speed_note.setWordWrap(True)
@@ -836,13 +878,19 @@ class MainWindow(QMainWindow):
         self.cleanup_logs_check = self.add_setting_toggle(
             logs_box, "Автоматически удалять старые логи"
         )
-        logs_box.addWidget(QLabel("Хранить логи"))
+        self.log_retention_controls = QWidget()
+        retention_box = QVBoxLayout(self.log_retention_controls)
+        retention_box.setContentsMargins(0, 0, 0, 0)
+        retention_box.setSpacing(6)
+        self.log_retention_label = QLabel("Хранить логи")
+        retention_box.addWidget(self.log_retention_label)
         self.log_retention_combo = QComboBox()
         self.log_retention_combo.addItem("1 неделя", 7)
         self.log_retention_combo.addItem("1 месяц", 30)
         self.log_retention_combo.addItem("3 месяца", 90)
         self.log_retention_combo.addItem("Всегда", 0)
-        logs_box.addWidget(self.log_retention_combo)
+        retention_box.addWidget(self.log_retention_combo)
+        logs_box.addWidget(self.log_retention_controls)
         self.smart_terminal_check = self.add_setting_toggle(
             logs_box, "Не прокручивать терминал вниз, если читаю старые строки"
         )
@@ -959,6 +1007,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(update_card)
 
         history_card, history_box = self.settings_section("ПРЕДЫДУЩИЕ ВЕРСИИ")
+        self.manual_update_card = history_card
         history_note = QLabel(
             "В ручном режиме можно скачать текущую или вернуться к любой опубликованной версии."
         )
@@ -1044,6 +1093,8 @@ class MainWindow(QMainWindow):
             QPushButton:hover {{ border-color: {accent_hover}; color: {accent if not all_buttons else accent_text}; }}
             QPushButton:pressed {{ background: {accent_color.darker(135).name()}; color: {accent_text}; }}
             QPushButton:disabled {{ color: {colors['muted']}; border-color: {colors['border']}; background: {colors['track']}; }}
+            QLabel:disabled, QCheckBox:disabled, QRadioButton:disabled {{ color: {colors['muted']}; }}
+            QPlainTextEdit:disabled, QLineEdit:disabled, QComboBox:disabled {{ color: {colors['muted']}; background: {colors['track']}; border-color: {colors['border']}; }}
             #pathButton, #folderLink {{ text-align: left; color: {accent}; background: transparent; border: 0; padding: 2px; font-weight: 600; }}
             #pathButton:hover, #folderLink:hover {{ color: {accent_hover}; text-decoration: underline; }}
             #tilePathButton {{ text-align: left; color: {accent}; background: {colors['input']}; border-color: {colors['border']}; }}
@@ -1070,12 +1121,15 @@ class MainWindow(QMainWindow):
             #updateButton {{ color: {green}; border-color: {green}; }}
             QCheckBox::indicator {{ width: 19px; height: 19px; border: 1px solid {colors['border']}; border-radius: 5px; background: {colors['input']}; }}
             QCheckBox::indicator:checked {{ background: {accent}; border-color: {accent_hover}; }}
+            QCheckBox::indicator:disabled {{ background: {colors['track']}; border-color: {colors['border']}; }}
             QRadioButton {{ spacing: 10px; padding: 5px 0; }}
             QRadioButton::indicator {{ width: 18px; height: 18px; border: 1px solid {colors['border']}; border-radius: 10px; background: {colors['input']}; }}
             QRadioButton::indicator:checked {{ background: {accent}; border: 5px solid {colors['card']}; }}
+            QRadioButton::indicator:disabled {{ background: {colors['track']}; border-color: {colors['border']}; }}
             QSlider::groove:horizontal {{ background: {colors['track']}; height: 5px; border-radius: 2px; }}
             QSlider::sub-page:horizontal {{ background: {accent}; border-radius: 2px; }}
             QSlider::handle:horizontal {{ background: {accent_hover}; border: 2px solid {colors['card']}; width: 17px; margin: -7px 0; border-radius: 10px; }}
+            QSlider::sub-page:horizontal:disabled, QSlider::handle:horizontal:disabled {{ background: {colors['muted']}; }}
             QScrollArea, QScrollArea > QWidget > QWidget {{ background: transparent; }}
             QScrollBar:vertical {{ background: transparent; width: 8px; }}
             QScrollBar::handle:vertical {{ background: {colors['border']}; border-radius: 4px; min-height: 30px; }}
@@ -1206,11 +1260,26 @@ class MainWindow(QMainWindow):
             self.setup_tray()
 
     def update_settings_visibility(self) -> None:
-        self.concurrency_spin.setEnabled(self.download_mode_combo.currentData() == "limited")
-        self.concurrency_label.setEnabled(self.download_mode_combo.currentData() == "limited")
+        limited = self.download_mode_combo.currentData() == "limited" and not self.running
+        self.concurrency_controls.setEnabled(limited)
+        self.concurrency_controls.setToolTip(
+            "" if limited else "Число файлов задаётся только в ограниченном режиме."
+        )
         manual = self.update_mode_combo.currentData() == "manual"
-        self.manual_update_widget.setVisible(manual)
-        self.log_retention_combo.setEnabled(self.cleanup_logs_check.isChecked())
+        self.manual_update_card.setEnabled(manual)
+        self.manual_update_card.setToolTip(
+            "" if manual else "Список версий доступен в ручном режиме обновлений."
+        )
+        keep_logs = self.cleanup_logs_check.isChecked()
+        self.log_retention_controls.setEnabled(keep_logs)
+        self.log_retention_controls.setToolTip(
+            "" if keep_logs else "Сначала включите автоматическое удаление старых логов."
+        )
+        self.set_toggle_available(
+            self.continue_in_tray_check,
+            self.tray_check.isChecked(),
+            "Сначала включите сворачивание приложения в системный tray.",
+        )
 
     def choose_accent_color(self) -> None:
         color = QColorDialog.getColor(QColor(self.accent_color), self, "Цвет кнопок и акцентов")
@@ -1250,8 +1319,8 @@ class MainWindow(QMainWindow):
         if mode == "sequential":
             return 1
         if mode == "limited":
-            return self.concurrency_spin.value()
-        return max(1, self.total_items)
+            return min(MAX_CONCURRENT_DOWNLOADS, max(1, self.concurrency_spin.value()))
+        return min(MAX_CONCURRENT_DOWNLOADS, max(1, self.total_items))
 
     @Slot(int)
     def animate_tab(self, index: int) -> None:
@@ -1416,11 +1485,17 @@ class MainWindow(QMainWindow):
             self.clear_button,
             self.browse_button,
             self.download_mode_combo,
-            self.concurrency_spin,
         ):
             widget.setEnabled(enabled)
+        self.update_settings_visibility()
+
+    def set_download_controls_enabled(self, enabled: bool) -> None:
+        for button in (self.pause_button, self.after_button, self.stop_button):
+            button.setEnabled(enabled)
 
     def start_downloads(self) -> None:
+        if self.running or self.workers:
+            return
         raw_items = [line.strip() for line in self.sources.toPlainText().splitlines() if line.strip()]
         items: list[str] = []
         seen: set[str] = set()
@@ -1439,6 +1514,19 @@ class MainWindow(QMainWindow):
         missing = [item for item in items if not Path(item).exists()]
         if missing:
             QMessageBox.warning(self, APP_NAME, "Не найдены выбранные пути:\n" + "\n".join(missing[:5]))
+            return
+        collisions = destination_collisions(items, destination)
+        if collisions:
+            details = []
+            for target, sources in list(collisions.items())[:4]:
+                details.append(f"{target}\n  ← " + "\n  ← ".join(sources))
+            QMessageBox.critical(
+                self,
+                APP_NAME,
+                "Несколько источников будут записываться в один и тот же путь. "
+                "Параллельная загрузка остановлена, чтобы не повредить файлы:\n\n"
+                + "\n\n".join(details),
+            )
             return
         try:
             destination.mkdir(parents=True, exist_ok=True)
@@ -1482,12 +1570,13 @@ class MainWindow(QMainWindow):
         self.terminal.clear()
         self.log_path = self.log_dir / f"session-{datetime.now():%Y%m%d-%H%M%S}.log"
         self.set_inputs_enabled(False)
+        self.set_download_controls_enabled(True)
         self.start_button.setEnabled(False)
         self.set_state("●  ЗАГРУЗКА")
         mode_names = {
             "sequential": "Последовательно",
             "limited": f"До {self.concurrency_spin.value()} одновременно",
-            "all": "Все одновременно",
+            "all": f"Все доступные · до {MAX_CONCURRENT_DOWNLOADS} одновременно",
         }
         selected_mode = str(self.download_mode_combo.currentData())
         self.footer_info.setText(mode_names.get(selected_mode, "Последовательно"))
@@ -1498,7 +1587,8 @@ class MainWindow(QMainWindow):
         mode = mode_names.get(selected_mode, "Последовательно").lower()
         self.append_log(
             f"{APP_NAME}\nСеанс: {datetime.now():%Y-%m-%d %H:%M:%S}\nRobocopy: {robocopy}\n"
-            f"Режим: {mode}\nОчередь: {len(items)}\nОбщий объём: {human_size(self.total_bytes)}\n"
+            f"Режим: {mode}\nЛимит процессов: {self.max_concurrent_downloads()}\n"
+            f"Очередь: {len(items)}\nОбщий объём: {human_size(self.total_bytes)}\n"
             f"Назначение: {destination}\nСвободно: {human_size(usage.free)} из {human_size(usage.total)}\n"
             f"Лог: {self.log_path}\n"
         )
@@ -1647,6 +1737,7 @@ class MainWindow(QMainWindow):
             and not self.stopping
         ):
             self.stopping = True
+            self.set_download_controls_enabled(False)
             self.queue.clear()
             self.append_log(
                 f"■ Выбранный текущий файл завершён: {source}\n"
@@ -1725,6 +1816,7 @@ class MainWindow(QMainWindow):
         self.stop_after_file = True
         self.stop_after_source = None
         self.queue.clear()
+        self.set_download_controls_enabled(False)
         if self.paused:
             for worker in list(self.workers.values()):
                 try:
@@ -1742,6 +1834,7 @@ class MainWindow(QMainWindow):
         self.metrics_timer.stop()
         self.start_button.setEnabled(True)
         self.set_inputs_enabled(True)
+        self.set_download_controls_enabled(False)
         self.pause_button.setText("ПАУЗА")
         self.after_button.setText("ПОСЛЕ ФАЙЛА")
         self.after_button.setToolTip("Остановить очередь после завершения текущего файла")
@@ -2066,6 +2159,9 @@ def main() -> int:
     app.setApplicationName(APP_NAME)
     app.setOrganizationName("NeonTools")
     app.setStyle("Fusion")
+    icon_path = resource_path("assets/neon-drive.png")
+    if icon_path.is_file():
+        app.setWindowIcon(QIcon(str(icon_path)))
 
     def report_unhandled(exc_type, exc_value, exc_tb) -> None:
         details = "".join(traceback.format_exception(exc_type, exc_value, exc_tb))
@@ -2085,5 +2181,8 @@ def main() -> int:
 
     sys.excepthook = report_unhandled
     window = MainWindow()
-    window.show()
+    if "--smoke-test" in sys.argv:
+        QTimer.singleShot(900, app.quit)
+    else:
+        window.show()
     return app.exec()
