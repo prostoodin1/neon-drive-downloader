@@ -312,7 +312,6 @@ class StopAfterCurrentFileTests(unittest.TestCase):
             window = MainWindow()
             window.notifications_check.setChecked(False)
             window.tabs.setCurrentIndex(window.upload_tab_index)
-            QApplication.processEvents()
             self.assertEqual(window.tabs.tabText(window.upload_tab_index), "ВЫГРУЗКА")
             self.assertEqual(window.active_transfer, "upload")
             self.assertEqual(window.start_button.text(), "НАЧАТЬ ВЫГРУЗКУ")

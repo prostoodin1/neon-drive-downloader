@@ -1,6 +1,6 @@
 # Changelog
 
-## 5.4.0-beta.2
+## 5.4.0-beta.3
 
 - Added a dedicated `ВЫГРУЗКА` tab for copying local files and folders to a
   Google Drive location selected through Windows Explorer.
