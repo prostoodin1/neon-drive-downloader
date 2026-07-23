@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from collections import deque
 from pathlib import Path
+from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -13,9 +14,11 @@ from PySide6.QtWidgets import QApplication, QLabel
 
 from neon_drive.app import (
     MAX_CONCURRENT_DOWNLOADS,
+    MAX_TURBO_THREADS,
     Downloader,
     MainWindow,
     TaskInfo,
+    TurboFileDownloader,
     destination_collisions,
     robocopy_arguments,
 )
@@ -176,7 +179,7 @@ class StopAfterCurrentFileTests(unittest.TestCase):
         window.update_settings_visibility()
         self.assertFalse(window.continue_in_tray_check.setting_container.isEnabled())
         self.assertFalse(window.log_retention_controls.isEnabled())
-        self.assertFalse(window.manual_update_card.isEnabled())
+        self.assertTrue(window.manual_update_card.isEnabled())
         self.assertFalse(window.manual_update_card.isHidden())
 
         window.force_exit = True
@@ -212,6 +215,10 @@ class StopAfterCurrentFileTests(unittest.TestCase):
             self.assertIn("/R:8", maximum)
             self.assertIn("/W:2", maximum)
 
+            turbo_folder, _ = robocopy_arguments(str(source), destination, "turbo", 16)
+            self.assertNotIn("/Z", turbo_folder)
+            self.assertIn("/MT:16", turbo_folder)
+
     def test_interface_has_no_preview_and_dialog_style_is_global(self) -> None:
         window = MainWindow()
         headings = [label.text() for label in window.findChildren(QLabel)]
@@ -229,7 +236,68 @@ class StopAfterCurrentFileTests(unittest.TestCase):
         )
         window.update_settings_visibility()
         self.assertTrue(window.directory_threads_controls.isEnabled())
+        self.assertFalse(window.turbo_threads_controls.isEnabled())
 
+        window.copy_profile_combo.setCurrentIndex(
+            window.copy_profile_combo.findData("turbo")
+        )
+        window.update_settings_visibility()
+        self.assertTrue(window.turbo_threads_controls.isEnabled())
+        self.assertEqual(window.turbo_threads_slider.maximum(), MAX_TURBO_THREADS)
+
+        window.force_exit = True
+        window.close()
+
+    def test_turbo_profile_uses_segmented_worker_for_one_file(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "large.bin"
+            source.write_bytes(b"neon")
+            destination = root / "downloads"
+            destination.mkdir()
+
+            window = MainWindow()
+            window.notifications_check.setChecked(False)
+            window.destination.setText(str(destination))
+            window.tasks = {str(source): TaskInfo(str(source), source.stat().st_size)}
+            window.download_mode_combo.setCurrentIndex(
+                window.download_mode_combo.findData("sequential")
+            )
+            window.copy_profile_combo.setCurrentIndex(
+                window.copy_profile_combo.findData("turbo")
+            )
+            window.turbo_threads_slider.setValue(12)
+
+            with patch.object(TurboFileDownloader, "start_item") as start_item:
+                window.start_task(str(source))
+
+            worker = window.workers.pop(str(source))
+            self.assertIsInstance(worker, TurboFileDownloader)
+            start_item.assert_called_once_with(str(source), destination, 12)
+            worker.deleteLater()
+            window.force_exit = True
+            window.close()
+
+    def test_manual_release_list_marks_beta_versions(self) -> None:
+        window = MainWindow()
+        window.notifications_check.setChecked(False)
+        window.update_mode_combo.setCurrentIndex(
+            window.update_mode_combo.findData("manual")
+        )
+        window.update_settings_visibility()
+        window.release_history_succeeded(
+            [
+                {
+                    "tag": "v5.4.0-beta.1",
+                    "version": "5.4.0-beta.1",
+                    "published_at": "2026-07-23T12:00:00Z",
+                    "prerelease": True,
+                }
+            ]
+        )
+
+        self.assertIn("BETA", window.release_combo.itemText(0))
+        self.assertTrue(window.install_selected_button.isEnabled())
         window.force_exit = True
         window.close()
 

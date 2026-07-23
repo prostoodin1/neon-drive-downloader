@@ -5,6 +5,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import traceback
 from collections import deque
@@ -20,6 +21,7 @@ from PySide6.QtCore import (
     QProcessEnvironment,
     QPropertyAnimation,
     QSettings,
+    QThread,
     Qt,
     QTimer,
     QUrl,
@@ -75,15 +77,18 @@ from .updater import (
     UpdateDownloadThread,
     launch_replacement,
 )
+from .turbo_copy import TurboCopyStopped, parallel_copy_file
 
 
 APP_NAME = "Neon Drive Downloader"
 MAX_CONCURRENT_DOWNLOADS = 10
 MAX_DIRECTORY_THREADS = 16
+MAX_TURBO_THREADS = 16
 COPY_PROFILE_NAMES = {
     "stable": "Надёжный · докачка после обрыва",
     "optimized": "Ускоренный · многопоточные папки с докачкой",
     "maximum": "Максимальная скорость · без докачки текущего файла",
+    "turbo": "Турбо · сегменты большого файла параллельно",
 }
 PERCENT_RE = re.compile(r"(?<!\d)(?P<pct>\d{1,3}(?:[.,]\d+)?)%")
 
@@ -170,7 +175,8 @@ def robocopy_arguments(
     """Build the real Robocopy command for the selected performance profile."""
     path = Path(source)
     profile = profile if profile in COPY_PROFILE_NAMES else "optimized"
-    retry_count, retry_wait = (8, 2) if profile == "maximum" else (20, 10)
+    robocopy_profile = "maximum" if profile == "turbo" else profile
+    retry_count, retry_wait = (8, 2) if robocopy_profile == "maximum" else (20, 10)
     common = [
         "/J",
         f"/R:{retry_count}",
@@ -184,12 +190,12 @@ def robocopy_arguments(
         "/BYTES",
         "/ETA",
     ]
-    if profile != "maximum":
+    if robocopy_profile != "maximum":
         common.insert(0, "/Z")
     target = copy_target_path(path, destination)
     if path.is_dir():
         folder_options = ["/E"]
-        if profile in ("optimized", "maximum"):
+        if robocopy_profile in ("optimized", "maximum"):
             threads = max(2, min(MAX_DIRECTORY_THREADS, int(directory_threads)))
             folder_options.append(f"/MT:{threads}")
         return [str(path), str(target), *folder_options, *common], target
@@ -413,6 +419,86 @@ class Downloader(QProcess):
             self.kill()
 
 
+class TurboFileDownloader(QThread):
+    log = Signal(str)
+    progress = Signal(str, float, float)
+    item_done = Signal(bool, str)
+    command_started = Signal(str)
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.current = ""
+        self.destination = Path()
+        self.expected_target: Path | None = None
+        self.workers = 8
+        self._stop_event = threading.Event()
+        self._run_event = threading.Event()
+        self._run_event.set()
+        self._user_stopped = False
+
+    def start_item(self, source: str, destination: Path, workers: int = 8) -> None:
+        self.current = source
+        self.destination = destination
+        self.expected_target = copy_target_path(source, destination)
+        self.workers = max(2, min(MAX_TURBO_THREADS, int(workers)))
+        self._stop_event.clear()
+        self._run_event.set()
+        self._user_stopped = False
+        description = (
+            f"turbo-copy --workers {self.workers} "
+            f"{subprocess.list2cmdline([source, str(self.expected_target)])}"
+        )
+        self.log.emit(
+            f"\n▶ ИСТОЧНИК: {source}\n▶ НАЗНАЧЕНИЕ: {self.expected_target}\n"
+            f"▶ ПРОФИЛЬ: {COPY_PROFILE_NAMES['turbo']}\n"
+            f"▶ ПАРАЛЛЕЛЬНЫХ СЕГМЕНТОВ: {self.workers}\n"
+        )
+        self.command_started.emit(description)
+        self.start()
+
+    def run(self) -> None:
+        if self.expected_target is None:
+            self.log.emit("\nОШИБКА ТУРБОРЕЖИМА: не задан путь назначения.\n")
+            self.item_done.emit(False, self.current)
+            return
+
+        def report(copied: int, total: int) -> None:
+            percent = copied * 100.0 / total if total else 100.0
+            self.progress.emit(self.current, percent, float(copied))
+
+        ok = False
+        try:
+            parallel_copy_file(
+                self.current,
+                self.expected_target,
+                self.workers,
+                stop_event=self._stop_event,
+                run_event=self._run_event,
+                progress=report,
+            )
+            ok = self.expected_target.exists()
+            if ok:
+                self.log.emit("\n✓ Турбокопирование завершено, все сегменты объединены.\n")
+        except TurboCopyStopped:
+            self.log.emit(
+                "\n■ Турбокопирование остановлено. Завершённые сегменты сохранены для докачки.\n"
+            )
+        except Exception as exc:
+            self.log.emit(f"\nОШИБКА ТУРБОРЕЖИМА: {exc}\n{traceback.format_exc()}\n")
+        self.item_done.emit(ok, self.current)
+
+    def suspend(self) -> None:
+        self._run_event.clear()
+
+    def resume(self) -> None:
+        self._run_event.set()
+
+    def stop(self) -> None:
+        self._user_stopped = True
+        self._stop_event.set()
+        self._run_event.set()
+
+
 class FileRow(QFrame):
     def __init__(
         self,
@@ -539,7 +625,8 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.settings = QSettings("NeonTools", APP_NAME)
         self.queue: deque[str] = deque()
-        self.workers: dict[str, Downloader] = {}
+        self.workers: dict[str, Downloader | TurboFileDownloader] = {}
+        self.turbo_workers: set[TurboFileDownloader] = set()
         self.tasks: dict[str, TaskInfo] = {}
         self.file_rows: dict[str, FileRow] = {}
         self.total_items = 0
@@ -565,6 +652,7 @@ class MainWindow(QMainWindow):
         self.release_history_thread: ReleaseHistoryThread | None = None
         self.release_history: list[dict] = []
         self.force_exit = False
+        self.close_when_idle = False
         self.settings_dirty = False
         self.tray_icon: QSystemTrayIcon | None = None
         self._animations: list[QPropertyAnimation] = []
@@ -861,6 +949,9 @@ class MainWindow(QMainWindow):
         self.copy_profile_combo.addItem("Надёжный · /Z и полная докачка", "stable")
         self.copy_profile_combo.addItem("Ускоренный · /Z + многопоточность", "optimized")
         self.copy_profile_combo.addItem("Максимальная скорость · без /Z", "maximum")
+        self.copy_profile_combo.addItem(
+            "Турбо · большой файл несколькими сегментами", "turbo"
+        )
         speed_box.addWidget(self.copy_profile_combo)
         self.directory_threads_controls = QWidget()
         directory_threads_box = QVBoxLayout(self.directory_threads_controls)
@@ -878,6 +969,22 @@ class MainWindow(QMainWindow):
         )
         directory_threads_box.addWidget(self.directory_threads_slider)
         speed_box.addWidget(self.directory_threads_controls)
+        self.turbo_threads_controls = QWidget()
+        turbo_threads_box = QVBoxLayout(self.turbo_threads_controls)
+        turbo_threads_box.setContentsMargins(0, 2, 0, 2)
+        turbo_threads_box.setSpacing(6)
+        self.turbo_threads_label = QLabel("Турбо-потоков для одного файла: 8")
+        turbo_threads_box.addWidget(self.turbo_threads_label)
+        self.turbo_threads_slider = QSlider(Qt.Orientation.Horizontal)
+        self.turbo_threads_slider.setRange(2, MAX_TURBO_THREADS)
+        self.turbo_threads_slider.setValue(8)
+        self.turbo_threads_slider.valueChanged.connect(
+            lambda value: self.turbo_threads_label.setText(
+                f"Турбо-потоков для одного файла: {value}"
+            )
+        )
+        turbo_threads_box.addWidget(self.turbo_threads_slider)
+        speed_box.addWidget(self.turbo_threads_controls)
         self.performance_note = QLabel()
         self.performance_note.setObjectName("settingDescription")
         self.performance_note.setWordWrap(True)
@@ -1064,10 +1171,10 @@ class MainWindow(QMainWindow):
         update_box.addLayout(update_row)
         layout.addWidget(update_card)
 
-        history_card, history_box = self.settings_section("ПРЕДЫДУЩИЕ ВЕРСИИ")
+        history_card, history_box = self.settings_section("ДОСТУПНЫЕ ВЕРСИИ")
         self.manual_update_card = history_card
         history_note = QLabel(
-            "В ручном режиме можно скачать текущую или вернуться к любой опубликованной версии."
+            "Выберите стабильную или BETA-версию, затем скачайте и установите её вручную."
         )
         history_note.setObjectName("settingDescription")
         history_box.addWidget(history_note)
@@ -1226,6 +1333,9 @@ class MainWindow(QMainWindow):
         self.directory_threads_slider.setValue(
             self.settings.value("directory_threads", 8, type=int)
         )
+        self.turbo_threads_slider.setValue(
+            self.settings.value("turbo_threads", 8, type=int)
+        )
         select(self.file_display_combo, self.settings.value("file_display", "list"))
         self.compact_check.setChecked(self.settings.value("compact_rows", False, type=bool))
         self.show_source_links_check.setChecked(
@@ -1273,6 +1383,7 @@ class MainWindow(QMainWindow):
             self.concurrency_spin.valueChanged,
             self.copy_profile_combo.currentIndexChanged,
             self.directory_threads_slider.valueChanged,
+            self.turbo_threads_slider.valueChanged,
             self.file_display_combo.currentIndexChanged,
             self.compact_check.stateChanged,
             self.show_source_links_check.stateChanged,
@@ -1302,6 +1413,7 @@ class MainWindow(QMainWindow):
         self.settings.setValue("concurrency", self.concurrency_spin.value())
         self.settings.setValue("copy_profile", self.copy_profile_combo.currentData())
         self.settings.setValue("directory_threads", self.directory_threads_slider.value())
+        self.settings.setValue("turbo_threads", self.turbo_threads_slider.value())
         self.settings.setValue("file_display", self.file_display_combo.currentData())
         self.settings.setValue("compact_rows", self.compact_check.isChecked())
         self.settings.setValue("show_source_links", self.show_source_links_check.isChecked())
@@ -1359,18 +1471,25 @@ class MainWindow(QMainWindow):
                 "Максимальная скорость: /MT для папок и короткие повторы. /Z отключён, поэтому "
                 "после обрыва текущий незавершённый файл может начаться заново."
             ),
+            "turbo": (
+                "Для одного большого файла приложение читает несколько независимых участков "
+                "одновременно. Это может сильнее загрузить канал Google Drive. Завершённые "
+                "сегменты сохраняются для докачки; для папок используется быстрый Robocopy."
+            ),
         }
         self.performance_note.setText(profile_notes.get(profile, profile_notes["optimized"]))
-        threaded_profile = profile in ("optimized", "maximum") and not self.running
+        threaded_profile = profile in ("optimized", "maximum", "turbo") and not self.running
         self.directory_threads_controls.setEnabled(threaded_profile)
+        turbo_profile = profile == "turbo" and not self.running
+        self.turbo_threads_controls.setEnabled(turbo_profile)
+        self.turbo_threads_controls.setToolTip(
+            "" if turbo_profile else "Число сегментов задаётся только для профиля «Турбо»."
+        )
         self.directory_threads_controls.setToolTip(
             "" if threaded_profile else "Число внутренних потоков используется в ускоренных профилях."
         )
-        manual = self.update_mode_combo.currentData() == "manual"
-        self.manual_update_card.setEnabled(manual)
-        self.manual_update_card.setToolTip(
-            "" if manual else "Список версий доступен в ручном режиме обновлений."
-        )
+        self.manual_update_card.setEnabled(True)
+        self.manual_update_card.setToolTip("")
         keep_logs = self.cleanup_logs_check.isChecked()
         self.log_retention_controls.setEnabled(keep_logs)
         self.log_retention_controls.setToolTip(
@@ -1428,6 +1547,13 @@ class MainWindow(QMainWindow):
         # Keep total Robocopy worker pressure bounded when several folders run at once.
         per_process_budget = max(2, 64 // max(1, self.max_concurrent_downloads()))
         return max(2, min(MAX_DIRECTORY_THREADS, requested, per_process_budget))
+
+    def effective_turbo_threads(self) -> int:
+        requested = self.turbo_threads_slider.value()
+        # Independent cloud reads are useful, but dozens per active file can trigger
+        # provider throttling. Keep the total pressure bounded across the queue.
+        per_file_budget = max(2, 32 // max(1, self.max_concurrent_downloads()))
+        return max(2, min(MAX_TURBO_THREADS, requested, per_file_budget))
 
     @Slot(int)
     def animate_tab(self, index: int) -> None:
@@ -1690,7 +1816,14 @@ class MainWindow(QMainWindow):
         selected_profile = str(self.copy_profile_combo.currentData() or "optimized")
         profile_name = COPY_PROFILE_NAMES.get(selected_profile, COPY_PROFILE_NAMES["optimized"])
         effective_threads = self.effective_directory_threads()
-        mt_status = str(effective_threads) if selected_profile in ("optimized", "maximum") else "выключен"
+        mt_status = (
+            str(effective_threads)
+            if selected_profile in ("optimized", "maximum", "turbo")
+            else "выключен"
+        )
+        turbo_status = (
+            str(self.effective_turbo_threads()) if selected_profile == "turbo" else "выключен"
+        )
         self.footer_info.setText(mode_names.get(selected_mode, "Последовательно"))
         self.speed.setText("ИЗМЕРЕНИЕ…")
         self.eta.setText("ИЗМЕРЕНИЕ…")
@@ -1701,6 +1834,7 @@ class MainWindow(QMainWindow):
             f"{APP_NAME}\nСеанс: {datetime.now():%Y-%m-%d %H:%M:%S}\nRobocopy: {robocopy}\n"
             f"Режим: {mode}\nЛимит процессов: {self.max_concurrent_downloads()}\n"
             f"Профиль: {profile_name}\nПотоков /MT на папку: {mt_status}\n"
+            f"Турбо-сегментов на большой файл: {turbo_status}\n"
             f"Очередь: {len(items)}\nОбщий объём: {human_size(self.total_bytes)}\n"
             f"Назначение: {destination}\nСвободно: {human_size(usage.free)} из {human_size(usage.total)}\n"
             f"Лог: {self.log_path}\n"
@@ -1741,17 +1875,30 @@ class MainWindow(QMainWindow):
         task.started_at = task.started_at or time.monotonic()
         if task.row:
             task.row.update_data(task.size, task.downloaded, task.speed, task.elapsed(), task.status)
-        worker = Downloader(self)
+        selected_profile = str(self.copy_profile_combo.currentData() or "optimized")
+        turbo_file = selected_profile == "turbo" and Path(source).is_file()
+        worker: Downloader | TurboFileDownloader
+        worker = TurboFileDownloader(self) if turbo_file else Downloader(self)
+        if isinstance(worker, TurboFileDownloader):
+            self.turbo_workers.add(worker)
+            worker.finished.connect(lambda current=worker: self.turbo_worker_finished(current))
         worker.log.connect(self.append_log)
         worker.progress.connect(self.on_progress)
         worker.item_done.connect(self.on_item_done)
         self.workers[source] = worker
-        worker.start_item(
-            source,
-            Path(self.destination.text()),
-            str(self.copy_profile_combo.currentData() or "optimized"),
-            self.effective_directory_threads(),
-        )
+        if turbo_file:
+            worker.start_item(
+                source,
+                Path(self.destination.text()),
+                self.effective_turbo_threads(),
+            )
+        else:
+            worker.start_item(
+                source,
+                Path(self.destination.text()),
+                selected_profile,
+                self.effective_directory_threads(),
+            )
 
     @Slot(str, float, float)
     def on_progress(self, source: str, percent: float, item_bytes: float) -> None:
@@ -1831,7 +1978,8 @@ class MainWindow(QMainWindow):
         task = self.tasks.get(source)
         worker = self.workers.pop(source, None)
         if worker:
-            QTimer.singleShot(0, worker.deleteLater)
+            if not isinstance(worker, TurboFileDownloader):
+                QTimer.singleShot(0, worker.deleteLater)
         if task:
             task.finished_at = time.monotonic()
             if ok:
@@ -1871,6 +2019,11 @@ class MainWindow(QMainWindow):
                 self.finish_queue(stopped=True)
             return
         self.fill_worker_slots()
+
+    def turbo_worker_finished(self, worker: TurboFileDownloader) -> None:
+        self.turbo_workers.discard(worker)
+        worker.deleteLater()
+        self.maybe_close_when_idle()
 
     def toggle_pause(self) -> None:
         if not self.workers:
@@ -1976,6 +2129,13 @@ class MainWindow(QMainWindow):
             f"Готово: {self.completed_items}/{self.total_items} · Ошибок: {self.failed_items}"
         )
         self.notify(APP_NAME, notification)
+
+        self.maybe_close_when_idle()
+
+    def maybe_close_when_idle(self) -> None:
+        if self.close_when_idle and not self.workers and not self.turbo_workers:
+            self.force_exit = True
+            QTimer.singleShot(0, self.close)
 
     def set_state(self, text: str) -> None:
         self.state_label.setText(text)
@@ -2184,9 +2344,11 @@ class MainWindow(QMainWindow):
         self.release_combo.clear()
         for index, release in enumerate(releases):
             published = str(release.get("published_at", ""))[:10]
+            channel = " · BETA" if release.get("prerelease") else ""
             marker = " · установлена" if release.get("version") == __version__ else ""
             self.release_combo.addItem(
-                f"{release.get('tag', release.get('version'))} · {published}{marker}", index
+                f"{release.get('tag', release.get('version'))}{channel} · {published}{marker}",
+                index,
             )
         self.install_selected_button.setEnabled(bool(releases))
         self.update_status.setText(
@@ -2269,12 +2431,21 @@ class MainWindow(QMainWindow):
             self.notify(APP_NAME, "Приложение продолжает работать в фоновом режиме.")
             event.ignore()
             return
-        if self.workers:
+        if self.workers or self.turbo_workers:
+            if self.close_when_idle:
+                event.ignore()
+                return
             answer = QMessageBox.question(self, APP_NAME, "Остановить загрузки и закрыть приложение?")
             if answer != QMessageBox.StandardButton.Yes:
                 event.ignore()
                 return
-            self.stop_now()
+            self.close_when_idle = True
+            if self.workers:
+                self.stop_now()
+            self.set_state("●  ЗАВЕРШЕНИЕ РАБОТЫ")
+            event.ignore()
+            self.maybe_close_when_idle()
+            return
         event.accept()
 
     def changeEvent(self, event) -> None:  # noqa: N802

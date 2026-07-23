@@ -9,10 +9,11 @@ from neon_drive import __version__
 from neon_drive import updater
 
 
-def release_payload(tag: str, assets: list[str]) -> dict:
+def release_payload(tag: str, assets: list[str], prerelease: bool = False) -> dict:
     return {
         "tag_name": tag,
         "name": tag,
+        "prerelease": prerelease,
         "assets": [
             {
                 "name": name,
@@ -24,6 +25,28 @@ def release_payload(tag: str, assets: list[str]) -> dict:
 
 
 class UpdaterTests(unittest.TestCase):
+    def test_prerelease_orders_before_matching_stable_version(self) -> None:
+        self.assertLess(
+            updater.version_tuple("v5.4.0-beta.1"),
+            updater.version_tuple("v5.4.0"),
+        )
+        self.assertLess(
+            updater.version_tuple("v5.4.0-beta.1"),
+            updater.version_tuple("v5.4.0-beta.2"),
+        )
+
+    def test_beta_release_is_marked_for_manual_history(self) -> None:
+        release = updater._normalize_release(
+            release_payload(
+                "v5.4.0-beta.1",
+                [updater.SETUP_ASSET_NAME],
+                prerelease=True,
+            ),
+            "public",
+        )
+        self.assertTrue(release["prerelease"])
+        self.assertEqual(release["version"], "5.4.0-beta.1")
+
     def test_release_prefers_installer_over_legacy_onefile(self) -> None:
         release = updater._normalize_release(
             release_payload(

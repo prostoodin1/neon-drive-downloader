@@ -1,5 +1,13 @@
 # Changelog
 
+## 5.4.0-beta.1
+
+- Added a Turbo profile that reads independent ranges of one large cloud-backed file in parallel.
+- Added a configurable 2–16 Turbo worker slider with an aggregate pressure limit across active files.
+- Added resumable `.neon-part` checkpoints for fully completed file segments.
+- Kept fast Robocopy as the automatic Turbo fallback for folders and multi-file trees.
+- Preserved pause, resume, stop, progress, speed, and ETA behavior for segmented copies.
+
 ## 5.3.0
 
 - Increased contrast for all application text and fixed unreadable QMessageBox dialogs.

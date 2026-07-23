@@ -30,8 +30,19 @@ def app_data_dir() -> Path:
 
 
 def version_tuple(value: str) -> tuple[int, ...]:
-    numbers = re.findall(r"\d+", value.lstrip("vV"))
-    return tuple(int(number) for number in numbers[:4]) or (0,)
+    raw = value.lstrip("vV").split("+", 1)[0]
+    core, separator, prerelease = raw.partition("-")
+    numbers = [int(number) for number in re.findall(r"\d+", core)[:4]]
+    while len(numbers) < 3:
+        numbers.append(0)
+    if not numbers:
+        numbers = [0, 0, 0]
+    if not separator:
+        return (*numbers, 1)
+    label = prerelease.casefold()
+    rank = 2 if "rc" in label else 1 if "beta" in label else 0
+    suffix_numbers = tuple(int(number) for number in re.findall(r"\d+", prerelease)) or (0,)
+    return (*numbers, 0, rank, *suffix_numbers)
 
 
 def running_onefile() -> bool:
@@ -117,6 +128,7 @@ def _normalize_release(data: dict, method: str) -> dict:
         "asset_url": asset.get("browser_download_url") or "",
         "asset_name": asset_name,
         "method": method,
+        "prerelease": bool(data.get("prerelease")),
         "available": version_tuple(tag) > version_tuple(__version__) or migration,
         "migration": migration,
         "current_version": __version__,

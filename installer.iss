@@ -1,5 +1,9 @@
 #ifndef MyAppVersion
-  #define MyAppVersion "5.3.0"
+  #define MyAppVersion "5.4.0-beta.1"
+#endif
+
+#ifndef MyAppFileVersion
+  #define MyAppFileVersion "5.4.0.1"
 #endif
 
 #define MyAppName "Neon Drive Downloader"
@@ -28,7 +32,7 @@ CloseApplications=yes
 RestartApplications=yes
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
-VersionInfoVersion={#MyAppVersion}
+VersionInfoVersion={#MyAppFileVersion}
 VersionInfoProductName={#MyAppName}
 VersionInfoDescription=Reliable Google Drive background downloader
 
