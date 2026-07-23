@@ -620,6 +620,26 @@ class TaskInfo:
         return max(0.0, end - self.started_at)
 
 
+@dataclass
+class TransferPanel:
+    direction: str
+    page: QWidget
+    sources: QPlainTextEdit
+    destination: QLineEdit
+    choose_files_button: QPushButton
+    choose_folder_button: QPushButton
+    clear_button: QPushButton
+    browse_button: QPushButton
+    show_destination_button: QPushButton
+    terminal: QPlainTextEdit
+    pause_button: QPushButton
+    after_button: QPushButton
+    stop_button: QPushButton
+    file_mode_label: QLabel
+    file_list_layout: QGridLayout
+    file_rows: dict[str, FileRow] = field(default_factory=dict)
+
+
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -629,6 +649,8 @@ class MainWindow(QMainWindow):
         self.turbo_workers: set[TurboFileDownloader] = set()
         self.tasks: dict[str, TaskInfo] = {}
         self.file_rows: dict[str, FileRow] = {}
+        self.transfer_panels: dict[str, TransferPanel] = {}
+        self.active_transfer = "download"
         self.total_items = 0
         self.completed_items = 0
         self.failed_items = 0
@@ -704,11 +726,17 @@ class MainWindow(QMainWindow):
         outer.addWidget(subtitle)
 
         self.tabs = QTabWidget(objectName="navTabs")
-        self.tabs.addTab(self.build_download_tab(), "ЗАГРУЗКА")
+        self.download_tab_index = self.tabs.addTab(
+            self.build_transfer_tab("download"), "ЗАГРУЗКА"
+        )
+        self.upload_tab_index = self.tabs.addTab(
+            self.build_transfer_tab("upload"), "ВЫГРУЗКА"
+        )
         self.tabs.addTab(self.build_settings_tab(), "НАСТРОЙКИ")
         self.tabs.addTab(self.build_interface_tab(), "ИНТЕРФЕЙС")
         self.tabs.addTab(self.build_updates_tab(), "ОБНОВЛЕНИЯ")
         self.tabs.currentChanged.connect(self.animate_tab)
+        self.tabs.currentChanged.connect(self.transfer_tab_changed)
         outer.addWidget(self.tabs, 1)
 
         outer.addWidget(self.build_overall_status())
@@ -716,7 +744,7 @@ class MainWindow(QMainWindow):
         self.start_button = QPushButton("НАЧАТЬ СКАЧИВАНИЕ")
         self.start_button.setObjectName("primary")
         self.start_button.setMinimumHeight(56)
-        self.start_button.clicked.connect(self.start_downloads)
+        self.start_button.clicked.connect(self.start_current_transfer)
         outer.addWidget(self.start_button)
 
         footer = QHBoxLayout()
@@ -756,7 +784,8 @@ class MainWindow(QMainWindow):
         status.addLayout(speed_box)
         return status_card
 
-    def build_download_tab(self) -> QWidget:
+    def build_transfer_tab(self, direction: str) -> QWidget:
+        upload = direction == "upload"
         page = QWidget()
         page_layout = QVBoxLayout(page)
         page_layout.setContentsMargins(0, 12, 0, 4)
@@ -767,35 +796,47 @@ class MainWindow(QMainWindow):
         form = QVBoxLayout(form_card)
         form.setContentsMargins(22, 20, 22, 22)
         form.setSpacing(12)
-        form.addWidget(self.label("ВЫБРАННЫЕ ФАЙЛЫ И ПАПКИ"))
-        self.sources = QPlainTextEdit()
-        self.sources.setPlaceholderText("Нажмите «Выбрать файлы» или «Выбрать папку»…")
-        form.addWidget(self.sources, 1)
+        form.addWidget(
+            self.label("ЛОКАЛЬНЫЕ ФАЙЛЫ И ПАПКИ" if upload else "ФАЙЛЫ И ПАПКИ С GOOGLE DRIVE")
+        )
+        sources = QPlainTextEdit()
+        sources.setPlaceholderText("Нажмите «Файлы» или «Папка» и выберите пути в Проводнике…")
+        form.addWidget(sources, 1)
         source_buttons = QHBoxLayout()
-        self.choose_files_button = QPushButton("ФАЙЛЫ…")
-        self.choose_files_button.setToolTip("Выбрать один или несколько файлов")
-        self.choose_files_button.clicked.connect(self.choose_files)
-        self.choose_folder_button = QPushButton("ПАПКА / ДИСК…")
-        self.choose_folder_button.setToolTip("Выбрать папку или подключённый диск")
-        self.choose_folder_button.clicked.connect(self.choose_source_folder)
-        self.clear_button = QPushButton("СБРОС")
-        self.clear_button.clicked.connect(self.sources.clear)
-        source_buttons.addWidget(self.choose_files_button)
-        source_buttons.addWidget(self.choose_folder_button)
-        source_buttons.addWidget(self.clear_button)
+        choose_files_button = QPushButton("ФАЙЛЫ…")
+        choose_files_button.setToolTip("Выбрать один или несколько файлов через Проводник")
+        choose_files_button.clicked.connect(
+            lambda _checked=False, selected=direction: self.choose_files_for(selected)
+        )
+        choose_folder_button = QPushButton("ПАПКА / ДИСК…")
+        choose_folder_button.setToolTip("Выбрать папку или подключённый диск через Проводник")
+        choose_folder_button.clicked.connect(
+            lambda _checked=False, selected=direction: self.choose_source_folder_for(selected)
+        )
+        clear_button = QPushButton("СБРОС")
+        clear_button.clicked.connect(sources.clear)
+        source_buttons.addWidget(choose_files_button)
+        source_buttons.addWidget(choose_folder_button)
+        source_buttons.addWidget(clear_button)
         form.addLayout(source_buttons)
-        form.addWidget(self.label("ПАПКА ЗАГРУЗКИ"))
+        form.addWidget(self.label("ПАПКА НА GOOGLE DRIVE" if upload else "ЛОКАЛЬНАЯ ПАПКА ЗАГРУЗКИ"))
         destination_row = QHBoxLayout()
-        self.destination = QLineEdit()
-        self.destination.setPlaceholderText("D:\\Downloads\\Google Drive")
-        self.browse_button = QPushButton("ОБЗОР")
-        self.browse_button.clicked.connect(self.choose_destination)
-        self.show_destination_button = QPushButton("ОТКРЫТЬ")
-        self.show_destination_button.setToolTip("Открыть папку загрузки")
-        self.show_destination_button.clicked.connect(self.open_destination_folder)
-        destination_row.addWidget(self.destination, 1)
-        destination_row.addWidget(self.browse_button)
-        destination_row.addWidget(self.show_destination_button)
+        destination = QLineEdit()
+        destination.setPlaceholderText("G:\\Мой диск" if upload else "D:\\Downloads\\Google Drive")
+        browse_button = QPushButton("ОБЗОР")
+        browse_button.clicked.connect(
+            lambda _checked=False, selected=direction: self.choose_destination_for(selected)
+        )
+        show_destination_button = QPushButton("ОТКРЫТЬ")
+        show_destination_button.setToolTip(
+            "Открыть папку Google Drive" if upload else "Открыть локальную папку загрузки"
+        )
+        show_destination_button.clicked.connect(
+            lambda _checked=False, selected=direction: self.open_destination_folder_for(selected)
+        )
+        destination_row.addWidget(destination, 1)
+        destination_row.addWidget(browse_button)
+        destination_row.addWidget(show_destination_button)
         form.addLayout(destination_row)
         content.addWidget(form_card, 5)
 
@@ -803,23 +844,23 @@ class MainWindow(QMainWindow):
         terminal_layout = QVBoxLayout(terminal_card)
         terminal_layout.setContentsMargins(20, 16, 20, 18)
         terminal_layout.addWidget(self.label("LIVE TERMINAL"))
-        self.terminal = QPlainTextEdit(objectName="terminal")
-        self.terminal.setReadOnly(True)
-        self.terminal.setPlaceholderText("Ожидание запуска…")
-        terminal_layout.addWidget(self.terminal, 1)
+        terminal = QPlainTextEdit(objectName="terminal")
+        terminal.setReadOnly(True)
+        terminal.setPlaceholderText("Ожидание запуска…")
+        terminal_layout.addWidget(terminal, 1)
         controls = QHBoxLayout()
-        self.pause_button = QPushButton("ПАУЗА")
-        self.pause_button.clicked.connect(self.toggle_pause)
-        self.after_button = QPushButton("ПОСЛЕ ФАЙЛА")
-        self.after_button.setToolTip("Остановить очередь после завершения активного файла")
-        self.after_button.clicked.connect(self.toggle_stop_after)
-        self.stop_button = QPushButton("СТОП", objectName="danger")
-        self.stop_button.clicked.connect(self.stop_now)
-        for button in (self.pause_button, self.after_button, self.stop_button):
+        pause_button = QPushButton("ПАУЗА")
+        pause_button.clicked.connect(self.toggle_pause)
+        after_button = QPushButton("ПОСЛЕ ФАЙЛА")
+        after_button.setToolTip("Остановить очередь после завершения активного файла")
+        after_button.clicked.connect(self.toggle_stop_after)
+        stop_button = QPushButton("СТОП", objectName="danger")
+        stop_button.clicked.connect(self.stop_now)
+        for button in (pause_button, after_button, stop_button):
             button.setEnabled(False)
         open_logs = QPushButton("ЛОГИ")
         open_logs.clicked.connect(self.open_logs)
-        for button in (self.pause_button, self.after_button, self.stop_button, open_logs):
+        for button in (pause_button, after_button, stop_button, open_logs):
             controls.addWidget(button)
         terminal_layout.addLayout(controls)
         content.addWidget(terminal_card, 7)
@@ -831,20 +872,57 @@ class MainWindow(QMainWindow):
         files_header = QHBoxLayout()
         files_header.addWidget(self.label("ФАЙЛЫ В РАБОТЕ · ВИД МЕНЯЕТСЯ В НАСТРОЙКАХ"))
         files_header.addStretch()
-        self.file_mode_label = QLabel("ПОДРОБНЫЙ СПИСОК")
-        self.file_mode_label.setObjectName("fileStatus")
-        files_header.addWidget(self.file_mode_label)
+        file_mode_label = QLabel("ПОДРОБНЫЙ СПИСОК")
+        file_mode_label.setObjectName("fileStatus")
+        files_header.addWidget(file_mode_label)
         files_layout.addLayout(files_header)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
-        self.file_list_widget = QWidget()
-        self.file_list_layout = QGridLayout(self.file_list_widget)
-        self.file_list_layout.setContentsMargins(0, 0, 0, 0)
-        self.file_list_layout.setSpacing(10)
-        scroll.setWidget(self.file_list_widget)
+        file_list_widget = QWidget()
+        file_list_layout = QGridLayout(file_list_widget)
+        file_list_layout.setContentsMargins(0, 0, 0, 0)
+        file_list_layout.setSpacing(10)
+        scroll.setWidget(file_list_widget)
         files_layout.addWidget(scroll, 1)
         page_layout.addWidget(files_card, 2)
+
+        panel = TransferPanel(
+            direction=direction,
+            page=page,
+            sources=sources,
+            destination=destination,
+            choose_files_button=choose_files_button,
+            choose_folder_button=choose_folder_button,
+            clear_button=clear_button,
+            browse_button=browse_button,
+            show_destination_button=show_destination_button,
+            terminal=terminal,
+            pause_button=pause_button,
+            after_button=after_button,
+            stop_button=stop_button,
+            file_mode_label=file_mode_label,
+            file_list_layout=file_list_layout,
+        )
+        self.transfer_panels[direction] = panel
+        if direction == "download":
+            self.sources = sources
+            self.destination = destination
+            self.choose_files_button = choose_files_button
+            self.choose_folder_button = choose_folder_button
+            self.clear_button = clear_button
+            self.browse_button = browse_button
+            self.show_destination_button = show_destination_button
+            self.terminal = terminal
+            self.pause_button = pause_button
+            self.after_button = after_button
+            self.stop_button = stop_button
+            self.file_mode_label = file_mode_label
+            self.file_list_layout = file_list_layout
+            self.file_rows = panel.file_rows
+        else:
+            self.upload_sources = sources
+            self.upload_destination = destination
         return page
 
     def create_restart_banner(self) -> QFrame:
@@ -1316,8 +1394,9 @@ class MainWindow(QMainWindow):
         self.ring.set_colors(colors["track"], accent, colors["text"])
         animations = not hasattr(self, "animations_check") or self.animations_check.isChecked()
         self.progress.animations_enabled = animations
-        for row in self.file_rows.values():
-            row.progress.animations_enabled = animations
+        for panel in self.transfer_panels.values():
+            for row in panel.file_rows.values():
+                row.progress.animations_enabled = animations
 
     def restore_settings(self) -> None:
         def select(combo: QComboBox, value) -> None:
@@ -1377,6 +1456,8 @@ class MainWindow(QMainWindow):
         select(self.log_retention_combo, self.settings.value("log_retention_days", 30, type=int))
         self.destination.setText(self.settings.value("destination", str(Path.home() / "Downloads")))
         self.sources.setPlainText(self.settings.value("sources", ""))
+        self.upload_destination.setText(self.settings.value("upload_destination", ""))
+        self.upload_sources.setPlainText(self.settings.value("upload_sources", ""))
 
         for signal in (
             self.download_mode_combo.currentIndexChanged,
@@ -1402,11 +1483,16 @@ class MainWindow(QMainWindow):
             self.log_retention_combo.currentIndexChanged,
         ):
             signal.connect(self.settings_changed)
-        self.sources.textChanged.connect(self.refresh_file_rows)
-        self.destination.textChanged.connect(self.refresh_file_rows)
+        self.sources.textChanged.connect(lambda: self.refresh_file_rows("download"))
+        self.destination.textChanged.connect(lambda _text: self.refresh_file_rows("download"))
+        self.upload_sources.textChanged.connect(lambda: self.refresh_file_rows("upload"))
+        self.upload_destination.textChanged.connect(
+            lambda _text: self.refresh_file_rows("upload")
+        )
         self.update_settings_visibility()
         self.apply_theme()
-        self.refresh_file_rows()
+        self.refresh_file_rows("download")
+        self.refresh_file_rows("upload")
 
     def persist_settings(self) -> None:
         self.settings.setValue("download_mode", self.download_mode_combo.currentData())
@@ -1434,6 +1520,8 @@ class MainWindow(QMainWindow):
         self.settings.setValue("log_retention_days", self.log_retention_combo.currentData())
         self.settings.setValue("destination", self.destination.text())
         self.settings.setValue("sources", self.sources.toPlainText())
+        self.settings.setValue("upload_destination", self.upload_destination.text())
+        self.settings.setValue("upload_sources", self.upload_sources.toPlainText())
         self.settings.sync()
 
     def settings_changed(self, *_args) -> None:
@@ -1447,7 +1535,8 @@ class MainWindow(QMainWindow):
                 self.animate_appearance(banner, duration=220)
         self.update_settings_visibility()
         self.apply_theme()
-        self.refresh_file_rows()
+        self.refresh_file_rows("download")
+        self.refresh_file_rows("upload")
         if self.sender() in (self.tray_check, self.notifications_check):
             self.setup_tray()
 
@@ -1555,6 +1644,35 @@ class MainWindow(QMainWindow):
         per_file_budget = max(2, 32 // max(1, self.max_concurrent_downloads()))
         return max(2, min(MAX_TURBO_THREADS, requested, per_file_budget))
 
+    def effective_copy_profile(self) -> str:
+        profile = str(self.copy_profile_combo.currentData() or "optimized")
+        if self.active_transfer == "upload" and profile == "turbo":
+            return "maximum"
+        return profile
+
+    def current_transfer_panel(self) -> TransferPanel:
+        return self.transfer_panels[self.active_transfer]
+
+    @Slot(int)
+    def transfer_tab_changed(self, index: int) -> None:
+        if self.running:
+            return
+        if index == self.download_tab_index:
+            self.active_transfer = "download"
+        elif index == self.upload_tab_index:
+            self.active_transfer = "upload"
+        else:
+            return
+        self.file_rows = self.current_transfer_panel().file_rows
+        self.update_start_button()
+
+    def update_start_button(self) -> None:
+        action = "ВЫГРУЗКУ" if self.active_transfer == "upload" else "СКАЧИВАНИЕ"
+        self.start_button.setText(f"НАЧАТЬ {action}")
+
+    def start_current_transfer(self) -> None:
+        self.start_transfers(self.active_transfer)
+
     @Slot(int)
     def animate_tab(self, index: int) -> None:
         if not hasattr(self, "animations_check") or not self.animations_check.isChecked():
@@ -1599,20 +1717,27 @@ class MainWindow(QMainWindow):
         else:
             animation.start()
 
-    def choose_destination(self) -> bool:
-        folder = QFileDialog.getExistingDirectory(self, "Выберите папку", self.destination.text())
+    def choose_destination_for(self, direction: str) -> bool:
+        panel = self.transfer_panels[direction]
+        title = "Выберите папку на Google Drive" if direction == "upload" else "Выберите папку"
+        folder = QFileDialog.getExistingDirectory(self, title, panel.destination.text())
         if folder:
-            self.destination.setText(folder)
-            self.settings.setValue("destination", folder)
+            panel.destination.setText(folder)
+            key = "upload_destination" if direction == "upload" else "destination"
+            self.settings.setValue(key, folder)
             return True
         return False
 
-    def open_destination_folder(self) -> None:
-        text = self.destination.text().strip()
+    def choose_destination(self) -> bool:
+        return self.choose_destination_for("download")
+
+    def open_destination_folder_for(self, direction: str) -> None:
+        panel = self.transfer_panels[direction]
+        text = panel.destination.text().strip()
         if not text:
-            if not self.choose_destination():
+            if not self.choose_destination_for(direction):
                 return
-            text = self.destination.text().strip()
+            text = panel.destination.text().strip()
         folder = Path(text).expanduser()
         try:
             folder.mkdir(parents=True, exist_ok=True)
@@ -1621,31 +1746,48 @@ class MainWindow(QMainWindow):
             return
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))
 
-    def _append_sources(self, paths: list[str]) -> None:
-        existing = [line.strip() for line in self.sources.toPlainText().splitlines() if line.strip()]
+    def open_destination_folder(self) -> None:
+        self.open_destination_folder_for("download")
+
+    def _append_sources_for(self, direction: str, paths: list[str]) -> None:
+        panel = self.transfer_panels[direction]
+        existing = [line.strip() for line in panel.sources.toPlainText().splitlines() if line.strip()]
         seen = {os.path.normcase(os.path.normpath(item)) for item in existing}
         for path in paths:
             normalized = os.path.normcase(os.path.normpath(path))
             if normalized not in seen:
                 existing.append(path)
                 seen.add(normalized)
-        self.sources.setPlainText("\n".join(existing))
+        panel.sources.setPlainText("\n".join(existing))
 
-    def choose_files(self) -> None:
-        start = self.settings.value("last_source_dir", "")
+    def _append_sources(self, paths: list[str]) -> None:
+        self._append_sources_for("download", paths)
+
+    def choose_files_for(self, direction: str) -> None:
+        key = "last_upload_source_dir" if direction == "upload" else "last_source_dir"
+        start = self.settings.value(key, "")
         files, _ = QFileDialog.getOpenFileNames(self, "Выберите файлы", start, "Все файлы (*)")
         if files:
-            self.settings.setValue("last_source_dir", str(Path(files[0]).parent))
-            self._append_sources(files)
-            self.maybe_auto_start()
+            self.settings.setValue(key, str(Path(files[0]).parent))
+            self._append_sources_for(direction, files)
+            if direction == "download":
+                self.maybe_auto_start()
 
-    def choose_source_folder(self) -> None:
-        start = self.settings.value("last_source_dir", "")
+    def choose_files(self) -> None:
+        self.choose_files_for("download")
+
+    def choose_source_folder_for(self, direction: str) -> None:
+        key = "last_upload_source_dir" if direction == "upload" else "last_source_dir"
+        start = self.settings.value(key, "")
         folder = QFileDialog.getExistingDirectory(self, "Выберите папку или диск", start)
         if folder:
-            self.settings.setValue("last_source_dir", folder)
-            self._append_sources([folder])
-            self.maybe_auto_start()
+            self.settings.setValue(key, folder)
+            self._append_sources_for(direction, [folder])
+            if direction == "download":
+                self.maybe_auto_start()
+
+    def choose_source_folder(self) -> None:
+        self.choose_source_folder_for("download")
 
     def maybe_auto_start(self) -> None:
         if self.running or not self.auto_start_check.isChecked():
@@ -1654,26 +1796,31 @@ class MainWindow(QMainWindow):
             return
         QTimer.singleShot(150, self.start_downloads)
 
-    def clear_file_rows(self) -> None:
-        while self.file_list_layout.count():
-            item = self.file_list_layout.takeAt(0)
+    def clear_file_rows(self, direction: str | None = None) -> None:
+        panel = self.transfer_panels[direction or self.active_transfer]
+        while panel.file_list_layout.count():
+            item = panel.file_list_layout.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
-        self.file_rows.clear()
+        panel.file_rows.clear()
+        if panel.direction == self.active_transfer:
+            self.file_rows = panel.file_rows
 
-    def refresh_file_rows(self) -> None:
+    def refresh_file_rows(self, direction: str = "download") -> None:
         if self.running:
             return
-        items = [line.strip() for line in self.sources.toPlainText().splitlines() if line.strip()]
-        destination = Path(self.destination.text().strip() or Path.home() / "Downloads")
+        panel = self.transfer_panels[direction]
+        items = [line.strip() for line in panel.sources.toPlainText().splitlines() if line.strip()]
+        fallback = Path.home() / "Downloads" if direction == "download" else Path.home()
+        destination = Path(panel.destination.text().strip() or fallback)
         mode = str(self.file_display_combo.currentData() or "list")
         mode_names = {
             "list": "ПОДРОБНЫЙ СПИСОК",
             "shortcut": "ЯРЛЫКИ",
             "paths": "ПУТИ КАК В ТЕРМИНАЛЕ",
         }
-        self.file_mode_label.setText(mode_names.get(mode, mode_names["list"]))
-        self.clear_file_rows()
+        panel.file_mode_label.setText(mode_names.get(mode, mode_names["list"]))
+        self.clear_file_rows(direction)
         for index, source in enumerate(items):
             row = FileRow(
                 source,
@@ -1689,19 +1836,20 @@ class MainWindow(QMainWindow):
             except OSError:
                 size = 0
             row.update_data(size, 0, 0, 0, "ОЖИДАНИЕ")
-            self.file_rows[source] = row
-            self.place_file_row(row, index, mode)
+            panel.file_rows[source] = row
+            self.place_file_row(row, index, mode, direction)
         if not items:
             empty = QLabel("Выбранные файлы появятся здесь")
             empty.setObjectName("settingDescription")
             empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.file_list_layout.addWidget(empty, 0, 0, 1, 3)
+            panel.file_list_layout.addWidget(empty, 0, 0, 1, 3)
 
-    def place_file_row(self, row: FileRow, index: int, mode: str) -> None:
+    def place_file_row(self, row: FileRow, index: int, mode: str, direction: str | None = None) -> None:
+        panel = self.transfer_panels[direction or self.active_transfer]
         if mode == "shortcut":
-            self.file_list_layout.addWidget(row, index // 3, index % 3)
+            panel.file_list_layout.addWidget(row, index // 3, index % 3)
         else:
-            self.file_list_layout.addWidget(row, index, 0, 1, 3)
+            panel.file_list_layout.addWidget(row, index, 0, 1, 3)
         self.animate_appearance(
             row,
             duration=240,
@@ -1710,27 +1858,45 @@ class MainWindow(QMainWindow):
         )
 
     def set_inputs_enabled(self, enabled: bool) -> None:
-        for widget in (
-            self.sources,
-            self.destination,
-            self.choose_files_button,
-            self.choose_folder_button,
-            self.clear_button,
-            self.browse_button,
-            self.download_mode_combo,
-            self.copy_profile_combo,
-        ):
+        panel_widgets = []
+        for panel in self.transfer_panels.values():
+            panel_widgets.extend(
+                [
+                    panel.sources,
+                    panel.destination,
+                    panel.choose_files_button,
+                    panel.choose_folder_button,
+                    panel.clear_button,
+                    panel.browse_button,
+                ]
+            )
+        for widget in (*panel_widgets, self.download_mode_combo, self.copy_profile_combo):
             widget.setEnabled(enabled)
         self.update_settings_visibility()
 
+    def set_transfer_controls_enabled(self, enabled: bool) -> None:
+        for direction, panel in self.transfer_panels.items():
+            active = enabled and direction == self.active_transfer
+            for button in (panel.pause_button, panel.after_button, panel.stop_button):
+                button.setEnabled(active)
+
     def set_download_controls_enabled(self, enabled: bool) -> None:
-        for button in (self.pause_button, self.after_button, self.stop_button):
-            button.setEnabled(enabled)
+        self.set_transfer_controls_enabled(enabled)
 
     def start_downloads(self) -> None:
+        self.start_transfers("download")
+
+    def start_uploads(self) -> None:
+        self.start_transfers("upload")
+
+    def start_transfers(self, direction: str) -> None:
         if self.running or self.workers:
             return
-        raw_items = [line.strip() for line in self.sources.toPlainText().splitlines() if line.strip()]
+        self.active_transfer = direction
+        panel = self.current_transfer_panel()
+        self.file_rows = panel.file_rows
+        self.update_start_button()
+        raw_items = [line.strip() for line in panel.sources.toPlainText().splitlines() if line.strip()]
         items: list[str] = []
         seen: set[str] = set()
         for item in raw_items:
@@ -1741,10 +1907,10 @@ class MainWindow(QMainWindow):
         if not items:
             QMessageBox.warning(self, APP_NAME, "Выберите хотя бы один файл или папку.")
             return
-        if not self.destination.text().strip():
-            if not self.choose_destination():
+        if not panel.destination.text().strip():
+            if not self.choose_destination_for(direction):
                 return
-        destination = Path(self.destination.text().strip()).expanduser()
+        destination = Path(panel.destination.text().strip()).expanduser()
         missing = [item for item in items if not Path(item).exists()]
         if missing:
             QMessageBox.warning(self, APP_NAME, "Не найдены выбранные пути:\n" + "\n".join(missing[:5]))
@@ -1758,7 +1924,7 @@ class MainWindow(QMainWindow):
                 self,
                 APP_NAME,
                 "Несколько источников будут записываться в один и тот же путь. "
-                "Параллельная загрузка остановлена, чтобы не повредить файлы:\n\n"
+                "Операция остановлена, чтобы не повредить файлы:\n\n"
                 + "\n\n".join(details),
             )
             return
@@ -1773,8 +1939,10 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, APP_NAME, "Не найден системный robocopy.exe.")
             return
 
-        self.settings.setValue("destination", str(destination))
-        self.settings.setValue("sources", self.sources.toPlainText())
+        destination_key = "upload_destination" if direction == "upload" else "destination"
+        sources_key = "upload_sources" if direction == "upload" else "sources"
+        self.settings.setValue(destination_key, str(destination))
+        self.settings.setValue(sources_key, panel.sources.toPlainText())
         self.persist_settings()
         self.set_state("●  АНАЛИЗ ФАЙЛОВ")
         QApplication.processEvents()
@@ -1801,19 +1969,20 @@ class MainWindow(QMainWindow):
         self.stopping = False
         self.paused = False
         self.running = True
-        self.terminal.clear()
+        panel.terminal.clear()
         self.log_path = self.log_dir / f"session-{datetime.now():%Y%m%d-%H%M%S}.log"
         self.set_inputs_enabled(False)
-        self.set_download_controls_enabled(True)
+        self.set_transfer_controls_enabled(True)
         self.start_button.setEnabled(False)
-        self.set_state("●  ЗАГРУЗКА")
+        operation = "ВЫГРУЗКА" if direction == "upload" else "ЗАГРУЗКА"
+        self.set_state(f"●  {operation}")
         mode_names = {
             "sequential": "Последовательно",
             "limited": f"До {self.concurrency_spin.value()} одновременно",
             "all": f"Все доступные · до {MAX_CONCURRENT_DOWNLOADS} одновременно",
         }
         selected_mode = str(self.download_mode_combo.currentData())
-        selected_profile = str(self.copy_profile_combo.currentData() or "optimized")
+        selected_profile = self.effective_copy_profile()
         profile_name = COPY_PROFILE_NAMES.get(selected_profile, COPY_PROFILE_NAMES["optimized"])
         effective_threads = self.effective_directory_threads()
         mt_status = (
@@ -1822,7 +1991,9 @@ class MainWindow(QMainWindow):
             else "выключен"
         )
         turbo_status = (
-            str(self.effective_turbo_threads()) if selected_profile == "turbo" else "выключен"
+            str(self.effective_turbo_threads())
+            if selected_profile == "turbo" and direction == "download"
+            else "выключен"
         )
         self.footer_info.setText(mode_names.get(selected_mode, "Последовательно"))
         self.speed.setText("ИЗМЕРЕНИЕ…")
@@ -1832,6 +2003,7 @@ class MainWindow(QMainWindow):
         mode = mode_names.get(selected_mode, "Последовательно").lower()
         self.append_log(
             f"{APP_NAME}\nСеанс: {datetime.now():%Y-%m-%d %H:%M:%S}\nRobocopy: {robocopy}\n"
+            f"Операция: {operation.lower()}\n"
             f"Режим: {mode}\nЛимит процессов: {self.max_concurrent_downloads()}\n"
             f"Профиль: {profile_name}\nПотоков /MT на папку: {mt_status}\n"
             f"Турбо-сегментов на большой файл: {turbo_status}\n"
@@ -1842,7 +2014,8 @@ class MainWindow(QMainWindow):
         self.fill_worker_slots()
 
     def rebuild_task_rows(self, destination: Path) -> None:
-        self.clear_file_rows()
+        panel = self.current_transfer_panel()
+        self.clear_file_rows(self.active_transfer)
         mode = str(self.file_display_combo.currentData() or "list")
         for index, (source, task) in enumerate(self.tasks.items()):
             row = FileRow(
@@ -1856,8 +2029,9 @@ class MainWindow(QMainWindow):
             )
             row.update_data(task.size, 0, 0, 0, "ОЖИДАНИЕ")
             task.row = row
-            self.file_rows[source] = row
-            self.place_file_row(row, index, mode)
+            panel.file_rows[source] = row
+            self.place_file_row(row, index, mode, self.active_transfer)
+        self.file_rows = panel.file_rows
 
     def start_next(self) -> None:
         self.fill_worker_slots()
@@ -1871,12 +2045,16 @@ class MainWindow(QMainWindow):
 
     def start_task(self, source: str) -> None:
         task = self.tasks[source]
-        task.status = "ЗАГРУЗКА"
+        task.status = "ВЫГРУЗКА" if self.active_transfer == "upload" else "ЗАГРУЗКА"
         task.started_at = task.started_at or time.monotonic()
         if task.row:
             task.row.update_data(task.size, task.downloaded, task.speed, task.elapsed(), task.status)
-        selected_profile = str(self.copy_profile_combo.currentData() or "optimized")
-        turbo_file = selected_profile == "turbo" and Path(source).is_file()
+        selected_profile = self.effective_copy_profile()
+        turbo_file = (
+            self.active_transfer == "download"
+            and selected_profile == "turbo"
+            and Path(source).is_file()
+        )
         worker: Downloader | TurboFileDownloader
         worker = TurboFileDownloader(self) if turbo_file else Downloader(self)
         if isinstance(worker, TurboFileDownloader):
@@ -1889,13 +2067,13 @@ class MainWindow(QMainWindow):
         if turbo_file:
             worker.start_item(
                 source,
-                Path(self.destination.text()),
+                Path(self.current_transfer_panel().destination.text()),
                 self.effective_turbo_threads(),
             )
         else:
             worker.start_item(
                 source,
-                Path(self.destination.text()),
+                Path(self.current_transfer_panel().destination.text()),
                 selected_profile,
                 self.effective_directory_threads(),
             )
@@ -2028,6 +2206,7 @@ class MainWindow(QMainWindow):
     def toggle_pause(self) -> None:
         if not self.workers:
             return
+        panel = self.current_transfer_panel()
         try:
             if self.paused:
                 for worker in self.workers.values():
@@ -2040,14 +2219,15 @@ class MainWindow(QMainWindow):
                     task.samples.clear()
                     if task.started_at is not None and task.finished_at is None:
                         task.samples.append((now, task.downloaded))
-                self.pause_button.setText("ПАУЗА")
-                self.set_state("●  ЗАГРУЗКА")
+                panel.pause_button.setText("ПАУЗА")
+                operation = "ВЫГРУЗКА" if self.active_transfer == "upload" else "ЗАГРУЗКА"
+                self.set_state(f"●  {operation}")
                 self.append_log("▶ Все активные загрузки продолжены.\n")
             else:
                 for worker in self.workers.values():
                     worker.suspend()
                 self.paused = True
-                self.pause_button.setText("ПРОДОЛЖИТЬ")
+                panel.pause_button.setText("ПРОДОЛЖИТЬ")
                 self.set_state("●  ПАУЗА")
                 self.append_log("Ⅱ Все активные загрузки приостановлены.\n")
         except psutil.Error as exc:
@@ -2056,11 +2236,12 @@ class MainWindow(QMainWindow):
     def toggle_stop_after(self) -> None:
         if not self.workers:
             return
+        panel = self.current_transfer_panel()
         if self.stop_after_file:
             self.stop_after_file = False
             self.stop_after_source = None
-            self.after_button.setText("ПОСЛЕ ФАЙЛА")
-            self.after_button.setToolTip("Остановить очередь после завершения текущего файла")
+            panel.after_button.setText("ПОСЛЕ ФАЙЛА")
+            panel.after_button.setToolTip("Остановить очередь после завершения текущего файла")
             self.append_log("▶ Остановка после файла отменена. Очередь снова продолжается.\n")
             self.fill_worker_slots()
             return
@@ -2073,8 +2254,8 @@ class MainWindow(QMainWindow):
         )
         self.stop_after_file = True
         current_name = Path(self.stop_after_source).name or self.stop_after_source
-        self.after_button.setText("ОТМЕНИТЬ")
-        self.after_button.setToolTip(f"Остановка после: {current_name}")
+        panel.after_button.setText("ОТМЕНИТЬ")
+        panel.after_button.setToolTip(f"Остановка после: {current_name}")
         self.append_log(
             f"■ Очередь остановится сразу после текущего файла: {self.stop_after_source}\n"
             "Новые файлы не запускаются. После него остальные активные процессы будут остановлены.\n"
@@ -2105,15 +2286,18 @@ class MainWindow(QMainWindow):
         self.metrics_timer.stop()
         self.start_button.setEnabled(True)
         self.set_inputs_enabled(True)
-        self.set_download_controls_enabled(False)
-        self.pause_button.setText("ПАУЗА")
-        self.after_button.setText("ПОСЛЕ ФАЙЛА")
-        self.after_button.setToolTip("Остановить очередь после завершения текущего файла")
+        self.set_transfer_controls_enabled(False)
+        panel = self.current_transfer_panel()
+        panel.pause_button.setText("ПАУЗА")
+        panel.after_button.setText("ПОСЛЕ ФАЙЛА")
+        panel.after_button.setToolTip("Остановить очередь после завершения текущего файла")
+        self.update_start_button()
         self.stop_after_source = None
+        operation = "Выгрузка" if self.active_transfer == "upload" else "Загрузка"
         if stopped:
             self.set_state("●  ОСТАНОВЛЕНО")
             self.append_log("\nОчередь остановлена. Частичные файлы оставлены для продолжения.\n")
-            notification = "Загрузка остановлена. Частичные файлы сохранены."
+            notification = f"{operation} остановлена. Частичные файлы сохранены."
         elif self.failed_items:
             self.set_state("●  ЗАВЕРШЕНО С ОШИБКАМИ")
             self.append_log(f"\nЗавершено с ошибками: {self.failed_items}.\n")
@@ -2123,8 +2307,8 @@ class MainWindow(QMainWindow):
             self.progress.set_progress(1000)
             self.ring.setValue(100)
             self.eta.setText("00:00")
-            self.append_log("\n✓ Вся очередь успешно загружена.\n")
-            notification = f"Все файлы загружены: {self.completed_items}."
+            self.append_log(f"\n✓ {operation}: вся очередь успешно завершена.\n")
+            notification = f"{operation} завершена. Файлов: {self.completed_items}."
         self.footer_info.setText(
             f"Готово: {self.completed_items}/{self.total_items} · Ошибок: {self.failed_items}"
         )
@@ -2152,13 +2336,14 @@ class MainWindow(QMainWindow):
                     stream.write(text)
             except OSError:
                 pass
-        scroll = self.terminal.verticalScrollBar()
+        terminal = self.current_transfer_panel().terminal
+        scroll = terminal.verticalScrollBar()
         old_position = scroll.value()
         was_at_bottom = old_position >= scroll.maximum() - 3
-        cursor = self.terminal.textCursor()
+        cursor = terminal.textCursor()
         cursor.movePosition(QTextCursor.MoveOperation.End)
         cursor.insertText(text)
-        self.terminal.setTextCursor(cursor)
+        terminal.setTextCursor(cursor)
         smart_scroll = not hasattr(self, "smart_terminal_check") or self.smart_terminal_check.isChecked()
         if was_at_bottom or not smart_scroll:
             scroll.setValue(scroll.maximum())

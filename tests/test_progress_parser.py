@@ -301,6 +301,80 @@ class StopAfterCurrentFileTests(unittest.TestCase):
         window.force_exit = True
         window.close()
 
+    def test_upload_tab_uses_explorer_paths_and_robocopy_worker(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "local-video.mkv"
+            source.write_bytes(b"neon-upload")
+            drive_destination = root / "Google Drive"
+            drive_destination.mkdir()
+
+            window = MainWindow()
+            window.notifications_check.setChecked(False)
+            window.tabs.setCurrentIndex(window.upload_tab_index)
+            QApplication.processEvents()
+            self.assertEqual(window.tabs.tabText(window.upload_tab_index), "ВЫГРУЗКА")
+            self.assertEqual(window.active_transfer, "upload")
+            self.assertEqual(window.start_button.text(), "НАЧАТЬ ВЫГРУЗКУ")
+
+            window.upload_sources.setPlainText(str(source))
+            window.upload_destination.setText(str(drive_destination))
+            window.tasks = {str(source): TaskInfo(str(source), source.stat().st_size)}
+            window.download_mode_combo.setCurrentIndex(
+                window.download_mode_combo.findData("sequential")
+            )
+            window.copy_profile_combo.setCurrentIndex(
+                window.copy_profile_combo.findData("turbo")
+            )
+
+            with patch.object(Downloader, "start_item") as start_item:
+                window.start_task(str(source))
+
+            worker = window.workers.pop(str(source))
+            self.assertIsInstance(worker, Downloader)
+            start_item.assert_called_once_with(
+                str(source),
+                drive_destination,
+                "maximum",
+                window.effective_directory_threads(),
+            )
+            worker.deleteLater()
+            window.force_exit = True
+            window.close()
+
+    def test_start_upload_initializes_independent_queue(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "local.bin"
+            source.write_bytes(b"upload-queue")
+            destination = root / "Mounted Google Drive"
+
+            window = MainWindow()
+            window.notifications_check.setChecked(False)
+            window.upload_sources.setPlainText(str(source))
+            window.upload_destination.setText(str(destination))
+
+            with (
+                patch("neon_drive.app.shutil.which", return_value="robocopy.exe"),
+                patch.object(window, "fill_worker_slots") as fill_worker_slots,
+            ):
+                window.start_uploads()
+
+            self.assertTrue(window.running)
+            self.assertEqual(window.active_transfer, "upload")
+            self.assertEqual(list(window.queue), [str(source)])
+            self.assertEqual(window.total_bytes, source.stat().st_size)
+            self.assertIn(
+                "Операция: выгрузка",
+                window.current_transfer_panel().terminal.toPlainText(),
+            )
+            fill_worker_slots.assert_called_once()
+
+            window.running = False
+            window.metrics_timer.stop()
+            window.force_exit = True
+            window.close()
+
 
 if __name__ == "__main__":
     unittest.main()

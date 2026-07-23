@@ -1,5 +1,14 @@
 # Changelog
 
+## 5.4.0-beta.2
+
+- Added a dedicated `ВЫГРУЗКА` tab for copying local files and folders to a
+  Google Drive location selected through Windows Explorer.
+- Added independent source, destination, queue preview, terminal, pause, stop,
+  progress, speed, and ETA state for download and upload screens.
+- Kept uploads on Robocopy so Google Drive for desktop remains responsible for
+  caching and safely sending data to the cloud.
+
 ## 5.4.0-beta.1
 
 - Added a Turbo profile that reads independent ranges of one large cloud-backed file in parallel.
