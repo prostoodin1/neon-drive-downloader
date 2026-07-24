@@ -5,17 +5,23 @@ import tempfile
 import unittest
 from collections import deque
 from pathlib import Path
+from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+os.environ.setdefault("NEON_DRIVE_DISABLE_AUTO_UPDATE", "1")
 
 from PySide6.QtCore import QSettings
-from PySide6.QtWidgets import QApplication, QLabel
+from PySide6.QtWidgets import QApplication, QLabel, QTabWidget
 
+from neon_drive.addons import UPLOAD_ADDON_FILE
 from neon_drive.app import (
     MAX_CONCURRENT_DOWNLOADS,
+    MAX_TURBO_THREADS,
     Downloader,
     MainWindow,
+    RcloneDownloader,
     TaskInfo,
+    TurboFileDownloader,
     destination_collisions,
     robocopy_arguments,
 )
@@ -67,21 +73,47 @@ class ProgressParserTests(unittest.TestCase):
 
         self.assertEqual(samples, [400, 410])
 
+    def test_rclone_progress_is_converted_to_item_bytes(self) -> None:
+        downloader = RcloneDownloader()
+        downloader.current = r"G:\Drive\large.bin"
+        downloader.expected_bytes = 1_000
+        samples: list[int] = []
+        downloader.progress.connect(lambda _source, _percent, size: samples.append(int(size)))
+
+        downloader._handle_output_line("Transferred: 500 B / 1000 B, 50%, 5 MiB/s, ETA 0s")
+
+        self.assertEqual(samples, [500])
+
 
 class StopAfterCurrentFileTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.temp_settings = tempfile.TemporaryDirectory()
+        cls.previous_addon_dir = os.environ.get("NEON_DRIVE_ADDON_DIR")
+        cls.addon_dir = Path(cls.temp_settings.name) / "addons"
+        cls.addon_dir.mkdir()
+        manifest = Path(__file__).parents[1] / "addons" / UPLOAD_ADDON_FILE
+        (cls.addon_dir / UPLOAD_ADDON_FILE).write_text(
+            manifest.read_text(encoding="utf-8"), encoding="utf-8"
+        )
+        os.environ["NEON_DRIVE_ADDON_DIR"] = str(cls.addon_dir)
         QSettings.setDefaultFormat(QSettings.Format.IniFormat)
         QSettings.setPath(
             QSettings.Format.IniFormat,
             QSettings.Scope.UserScope,
             str(Path(cls.temp_settings.name)),
         )
+        isolated_settings = QSettings("NeonTools", "Neon Drive Downloader")
+        isolated_settings.clear()
+        isolated_settings.sync()
         cls.app = QApplication.instance() or QApplication([])
 
     @classmethod
     def tearDownClass(cls) -> None:
+        if cls.previous_addon_dir is None:
+            os.environ.pop("NEON_DRIVE_ADDON_DIR", None)
+        else:
+            os.environ["NEON_DRIVE_ADDON_DIR"] = cls.previous_addon_dir
         cls.temp_settings.cleanup()
 
     def test_selected_current_file_stops_remaining_parallel_worker(self) -> None:
@@ -176,7 +208,7 @@ class StopAfterCurrentFileTests(unittest.TestCase):
         window.update_settings_visibility()
         self.assertFalse(window.continue_in_tray_check.setting_container.isEnabled())
         self.assertFalse(window.log_retention_controls.isEnabled())
-        self.assertFalse(window.manual_update_card.isEnabled())
+        self.assertTrue(window.manual_update_card.isEnabled())
         self.assertFalse(window.manual_update_card.isHidden())
 
         window.force_exit = True
@@ -212,6 +244,10 @@ class StopAfterCurrentFileTests(unittest.TestCase):
             self.assertIn("/R:8", maximum)
             self.assertIn("/W:2", maximum)
 
+            turbo_folder, _ = robocopy_arguments(str(source), destination, "turbo", 16)
+            self.assertNotIn("/Z", turbo_folder)
+            self.assertIn("/MT:16", turbo_folder)
+
     def test_interface_has_no_preview_and_dialog_style_is_global(self) -> None:
         window = MainWindow()
         headings = [label.text() for label in window.findChildren(QLabel)]
@@ -229,9 +265,447 @@ class StopAfterCurrentFileTests(unittest.TestCase):
         )
         window.update_settings_visibility()
         self.assertTrue(window.directory_threads_controls.isEnabled())
+        self.assertFalse(window.turbo_threads_controls.isEnabled())
+
+        window.copy_profile_combo.setCurrentIndex(
+            window.copy_profile_combo.findData("turbo")
+        )
+        window.update_settings_visibility()
+        self.assertTrue(window.turbo_threads_controls.isEnabled())
+        self.assertEqual(window.turbo_threads_slider.maximum(), MAX_TURBO_THREADS)
 
         window.force_exit = True
         window.close()
+
+    def test_advanced_mode_adds_tab_and_reveals_terminal(self) -> None:
+        window = MainWindow()
+        window.notifications_check.setChecked(False)
+        window.advanced_mode_check.setChecked(False)
+        window.update_settings_visibility()
+        self.assertEqual(window.tabs.indexOf(window.advanced_page), -1)
+        self.assertFalse(window.transfer_panels["download"].terminal_card.isVisible())
+
+        window.advanced_mode_check.setChecked(True)
+        window.update_settings_visibility()
+        self.assertGreaterEqual(window.tabs.indexOf(window.advanced_page), 0)
+        self.assertFalse(window.transfer_panels["download"].terminal_card.isHidden())
+
+        window.advanced_mode_check.setChecked(False)
+        window.force_exit = True
+        window.close()
+
+    def test_navigation_can_move_left_and_collapse_without_changing_page(self) -> None:
+        window = MainWindow()
+        window.notifications_check.setChecked(False)
+        window.animations_check.setChecked(True)
+        window.navigation_mode_combo.setCurrentIndex(
+            window.navigation_mode_combo.findData("top")
+        )
+        window.update_settings_visibility()
+        self.assertEqual(window.tabs.tabPosition(), QTabWidget.TabPosition.North)
+        self.assertTrue(window.navigation_toggle_button.isHidden())
+
+        window.navigation_mode_combo.setCurrentIndex(
+            window.navigation_mode_combo.findData("side")
+        )
+        window.update_settings_visibility()
+        page = window.tabs.currentWidget()
+        self.assertEqual(window.tabs.tabPosition(), QTabWidget.TabPosition.West)
+        self.assertFalse(window.navigation_toggle_button.isHidden())
+        self.assertGreater(
+            window.tabs.tabBar().tabSizeHint(0).width(),
+            window.tabs.tabBar().tabSizeHint(0).height(),
+        )
+
+        window.files_tab_check.setChecked(True)
+        window.tabs.setCurrentWidget(window.files_page)
+        QApplication.processEvents()
+        self.assertIsNotNone(window.tab_slide_animation)
+        self.assertEqual(window.tab_slide_animation.propertyName(), b"pos")
+        self.assertEqual(window.tab_slide_animation.duration(), 280)
+        page = window.tabs.currentWidget()
+
+        window.set_navigation_panel_expanded(False, animate=False)
+        self.assertTrue(window.tabs.tabBar().isHidden())
+        self.assertIs(window.tabs.currentWidget(), page)
+        window.set_navigation_panel_expanded(True, animate=False)
+        self.assertFalse(window.tabs.tabBar().isHidden())
+        self.assertIs(window.tabs.currentWidget(), page)
+
+        window.navigation_mode_combo.setCurrentIndex(
+            window.navigation_mode_combo.findData("top")
+        )
+        window.files_tab_check.setChecked(False)
+        window.force_exit = True
+        window.close()
+
+    def test_optional_files_tab_aggregates_download_and_upload_status(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            download_source = root / "cloud.bin"
+            upload_source = root / "local.bin"
+            download_source.write_bytes(b"d" * 100)
+            upload_source.write_bytes(b"u" * 80)
+            download_destination = root / "Downloads"
+            upload_destination = root / "Google Drive"
+
+            window = MainWindow()
+            window.notifications_check.setChecked(False)
+            window.animations_check.setChecked(False)
+            window.files_tab_check.setChecked(False)
+            self.assertEqual(window.tabs.indexOf(window.files_page), -1)
+
+            window.sources.setPlainText(str(download_source))
+            window.destination.setText(str(download_destination))
+            window.upload_sources.setPlainText(str(upload_source))
+            window.upload_destination.setText(str(upload_destination))
+            window.files_tab_check.setChecked(True)
+
+            self.assertGreaterEqual(window.tabs.indexOf(window.files_page), 0)
+            self.assertIn(("download", str(download_source)), window.files_overview_rows)
+            self.assertIn(("upload", str(upload_source)), window.files_overview_rows)
+            self.assertIn("ФАЙЛОВ: 2", window.files_summary_label.text())
+
+            task = TaskInfo(
+                source=str(download_source),
+                size=100,
+                downloaded=25,
+                speed=4 * 1024 * 1024,
+                status="ЗАГРУЗКА",
+            )
+            window.tasks = {str(download_source): task}
+            window.running = True
+            window.bind_transfer_panel("download")
+            window.refresh_files_overview()
+            row = window.files_overview_rows[("download", str(download_source))]
+            self.assertEqual(row.progress.value(), 250)
+            self.assertEqual(row.status.text(), "ЗАГРУЗКА")
+            self.assertIn("4.0 МБ/с", row.read_speed_label.text())
+            self.assertIn("4.0 МБ/с", row.write_speed_label.text())
+            self.assertEqual(row.source_button.text(), str(download_source))
+            self.assertEqual(row.destination_button.text(), str(download_destination / "cloud.bin"))
+
+            window.running = False
+            window.tasks.clear()
+            window.sources.clear()
+            window.upload_sources.clear()
+            window.files_tab_check.setChecked(False)
+            window.force_exit = True
+            window.close()
+
+    def test_all_settings_geometry_and_active_tab_survive_restart(self) -> None:
+        window = MainWindow()
+        window.notifications_check.setChecked(False)
+        window.advanced_mode_check.setChecked(True)
+        window.files_tab_check.setChecked(True)
+        window.navigation_mode_combo.setCurrentIndex(
+            window.navigation_mode_combo.findData("side_compact")
+        )
+        window.set_navigation_panel_expanded(False, animate=False)
+        window.window_size_combo.setCurrentIndex(
+            window.window_size_combo.findData("remember")
+        )
+        window.resize(1010, 720)
+        window.move(42, 57)
+        window.theme_combo.setCurrentIndex(window.theme_combo.findData("dark"))
+        window.design_mode_combo.setCurrentIndex(window.design_mode_combo.findData("small"))
+        window.copy_engine_combo.setCurrentIndex(
+            window.copy_engine_combo.findData("rclone")
+        )
+        window.rclone_chunk_combo.setCurrentIndex(
+            window.rclone_chunk_combo.findData(128)
+        )
+        window.rclone_checksum_check.setChecked(True)
+        window.sources.setPlainText(r"G:\Remembered\cloud.bin")
+        window.destination.setText(r"D:\Remembered Downloads")
+        window.upload_sources.setPlainText(r"D:\Remembered\local.bin")
+        window.upload_destination.setText(r"G:\Remembered Uploads")
+        window.tabs.setCurrentWidget(window.files_page)
+        window.persist_settings()
+        window.force_exit = True
+        window.close()
+
+        restored = MainWindow()
+        restored.notifications_check.setChecked(False)
+        self.assertTrue(restored.advanced_mode_check.isChecked())
+        self.assertTrue(restored.files_tab_check.isChecked())
+        self.assertEqual(restored.navigation_mode_combo.currentData(), "side_compact")
+        self.assertFalse(restored.sidebar_expanded)
+        self.assertEqual(restored.window_size_combo.currentData(), "remember")
+        self.assertEqual((restored.width(), restored.height()), (1010, 720))
+        self.assertEqual(restored.theme_combo.currentData(), "dark")
+        self.assertEqual(restored.design_mode_combo.currentData(), "small")
+        self.assertEqual(restored.copy_engine_combo.currentData(), "rclone")
+        self.assertEqual(restored.rclone_chunk_combo.currentData(), 128)
+        self.assertTrue(restored.rclone_checksum_check.isChecked())
+        self.assertEqual(restored.sources.toPlainText(), r"G:\Remembered\cloud.bin")
+        self.assertEqual(restored.destination.text(), r"D:\Remembered Downloads")
+        self.assertEqual(restored.upload_sources.toPlainText(), r"D:\Remembered\local.bin")
+        self.assertEqual(restored.upload_destination.text(), r"G:\Remembered Uploads")
+        self.assertIs(restored.tabs.currentWidget(), restored.files_page)
+        self.assertTrue(restored.settings.value("window_geometry"))
+
+        restored.advanced_mode_check.setChecked(False)
+        restored.files_tab_check.setChecked(False)
+        restored.navigation_mode_combo.setCurrentIndex(
+            restored.navigation_mode_combo.findData("top")
+        )
+        restored.window_size_combo.setCurrentIndex(
+            restored.window_size_combo.findData("standard")
+        )
+        restored.theme_combo.setCurrentIndex(restored.theme_combo.findData("oled"))
+        restored.design_mode_combo.setCurrentIndex(
+            restored.design_mode_combo.findData("compact")
+        )
+        restored.copy_engine_combo.setCurrentIndex(
+            restored.copy_engine_combo.findData("robocopy")
+        )
+        restored.rclone_chunk_combo.setCurrentIndex(
+            restored.rclone_chunk_combo.findData(64)
+        )
+        restored.rclone_checksum_check.setChecked(False)
+        restored.sources.clear()
+        restored.destination.setText(str(Path.home() / "Downloads"))
+        restored.upload_sources.clear()
+        restored.upload_destination.clear()
+        restored.tabs.setCurrentWidget(restored.download_page)
+        restored.persist_settings()
+        restored.force_exit = True
+        restored.close()
+
+    def test_design_modes_are_compact_by_default_and_switch_live(self) -> None:
+        window = MainWindow()
+        window.notifications_check.setChecked(False)
+
+        self.assertEqual(window.design_mode_combo.currentData(), "compact")
+        self.assertEqual(window.start_button.minimumHeight(), 42)
+        modes = {
+            window.design_mode_combo.itemData(index)
+            for index in range(window.design_mode_combo.count())
+        }
+        self.assertEqual(modes, {"small", "compact", "comfortable", "minimal"})
+
+        window.design_mode_combo.setCurrentIndex(
+            window.design_mode_combo.findData("small")
+        )
+        self.assertEqual(window.start_button.minimumHeight(), 38)
+        self.assertEqual(
+            window.transfer_panels["upload"].start_button.minimumHeight(), 38
+        )
+
+        window.design_mode_combo.setCurrentIndex(
+            window.design_mode_combo.findData("comfortable")
+        )
+        self.assertEqual(window.start_button.minimumHeight(), 52)
+        window.design_mode_combo.setCurrentIndex(
+            window.design_mode_combo.findData("compact")
+        )
+        window.force_exit = True
+        window.close()
+
+    def test_window_presets_and_transfer_pages_own_their_status_controls(self) -> None:
+        window = MainWindow()
+        window.notifications_check.setChecked(False)
+        download = window.transfer_panels["download"]
+        upload = window.transfer_panels["upload"]
+
+        self.assertIsNot(download.start_button, upload.start_button)
+        self.assertIsNot(download.progress, upload.progress)
+        self.assertTrue(window.download_page.isAncestorOf(download.start_button))
+        self.assertTrue(window.upload_page.isAncestorOf(upload.start_button))
+        self.assertFalse(window.settings_page.isAncestorOf(download.status_card))
+        self.assertFalse(window.updates_page.isAncestorOf(upload.status_card))
+        self.assertEqual(download.start_button.text(), "Начать загрузку")
+        self.assertEqual(upload.start_button.text(), "Начать выгрузку")
+
+        window.window_size_combo.setCurrentIndex(
+            window.window_size_combo.findData("small")
+        )
+        self.assertEqual((window.width(), window.height()), (960, 700))
+        window.window_size_combo.setCurrentIndex(
+            window.window_size_combo.findData("large")
+        )
+        self.assertEqual((window.width(), window.height()), (1480, 980))
+
+        window.window_size_combo.setCurrentIndex(
+            window.window_size_combo.findData("standard")
+        )
+        window.force_exit = True
+        window.close()
+
+    def test_stable_build_hides_upload_addon_controls_and_tab(self) -> None:
+        with patch("neon_drive.app.is_beta_build", return_value=False):
+            window = MainWindow()
+        window.notifications_check.setChecked(False)
+
+        self.assertEqual(window.tabs.indexOf(window.upload_page), -1)
+        self.assertFalse(hasattr(window, "addon_install_button"))
+        window.force_exit = True
+        window.close()
+
+    def test_turbo_profile_uses_segmented_worker_for_one_file(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "large.bin"
+            source.write_bytes(b"neon")
+            destination = root / "downloads"
+            destination.mkdir()
+
+            window = MainWindow()
+            window.notifications_check.setChecked(False)
+            window.destination.setText(str(destination))
+            window.tasks = {str(source): TaskInfo(str(source), source.stat().st_size)}
+            window.download_mode_combo.setCurrentIndex(
+                window.download_mode_combo.findData("sequential")
+            )
+            window.copy_profile_combo.setCurrentIndex(
+                window.copy_profile_combo.findData("turbo")
+            )
+            window.turbo_threads_slider.setValue(12)
+
+            with patch.object(TurboFileDownloader, "start_item") as start_item:
+                window.start_task(str(source))
+
+            worker = window.workers.pop(str(source))
+            self.assertIsInstance(worker, TurboFileDownloader)
+            start_item.assert_called_once_with(str(source), destination, 12)
+            worker.deleteLater()
+            window.force_exit = True
+            window.close()
+
+    def test_rclone_mode_uses_rclone_worker_and_selected_options(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "large.bin"
+            source.write_bytes(b"neon-rclone")
+            destination = root / "downloads"
+            destination.mkdir()
+
+            window = MainWindow()
+            window.notifications_check.setChecked(False)
+            window.destination.setText(str(destination))
+            window.tasks = {str(source): TaskInfo(str(source), source.stat().st_size)}
+            window.copy_engine_combo.setCurrentIndex(
+                window.copy_engine_combo.findData("rclone")
+            )
+            window.rclone_executable = "rclone.exe"
+            options = window.selected_rclone_options()
+
+            with patch.object(RcloneDownloader, "start_item") as start_item:
+                window.start_task(str(source))
+
+            worker = window.workers.pop(str(source))
+            self.assertIsInstance(worker, RcloneDownloader)
+            start_item.assert_called_once_with(
+                "rclone.exe",
+                str(source),
+                destination,
+                options,
+                source.stat().st_size,
+            )
+            window.copy_engine_combo.setCurrentIndex(
+                window.copy_engine_combo.findData("robocopy")
+            )
+            worker.deleteLater()
+            window.force_exit = True
+            window.close()
+
+    def test_manual_release_list_marks_beta_versions(self) -> None:
+        window = MainWindow()
+        window.notifications_check.setChecked(False)
+        window.update_mode_combo.setCurrentIndex(
+            window.update_mode_combo.findData("manual")
+        )
+        window.update_settings_visibility()
+        window.release_history_succeeded(
+            [
+                {
+                    "tag": "v5.4.0-beta.1",
+                    "version": "5.4.0-beta.1",
+                    "published_at": "2026-07-23T12:00:00Z",
+                    "prerelease": True,
+                }
+            ]
+        )
+
+        self.assertIn("BETA", window.release_combo.itemText(0))
+        self.assertTrue(window.install_selected_button.isEnabled())
+        window.force_exit = True
+        window.close()
+
+    def test_upload_tab_uses_explorer_paths_and_robocopy_worker(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "local-video.mkv"
+            source.write_bytes(b"neon-upload")
+            drive_destination = root / "Google Drive"
+            drive_destination.mkdir()
+
+            window = MainWindow()
+            window.notifications_check.setChecked(False)
+            window.tabs.setCurrentIndex(window.upload_tab_index)
+            self.assertEqual(window.tabs.tabText(window.upload_tab_index), "Выгрузка")
+            self.assertEqual(window.active_transfer, "upload")
+            self.assertEqual(window.start_button.text(), "Начать выгрузку")
+            self.assertIn("1.0.0-beta.1", window.addon_status_badge.text())
+
+            window.upload_sources.setPlainText(str(source))
+            window.upload_destination.setText(str(drive_destination))
+            window.tasks = {str(source): TaskInfo(str(source), source.stat().st_size)}
+            window.download_mode_combo.setCurrentIndex(
+                window.download_mode_combo.findData("sequential")
+            )
+            window.copy_profile_combo.setCurrentIndex(
+                window.copy_profile_combo.findData("turbo")
+            )
+
+            with patch.object(Downloader, "start_item") as start_item:
+                window.start_task(str(source))
+
+            worker = window.workers.pop(str(source))
+            self.assertIsInstance(worker, Downloader)
+            start_item.assert_called_once_with(
+                str(source),
+                drive_destination,
+                "maximum",
+                window.effective_directory_threads(),
+            )
+            worker.deleteLater()
+            window.force_exit = True
+            window.close()
+
+    def test_start_upload_initializes_independent_queue(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "local.bin"
+            source.write_bytes(b"upload-queue")
+            destination = root / "Mounted Google Drive"
+
+            window = MainWindow()
+            window.notifications_check.setChecked(False)
+            window.upload_sources.setPlainText(str(source))
+            window.upload_destination.setText(str(destination))
+
+            with (
+                patch("neon_drive.app.shutil.which", return_value="robocopy.exe"),
+                patch.object(window, "fill_worker_slots") as fill_worker_slots,
+            ):
+                window.start_uploads()
+
+            self.assertTrue(window.running)
+            self.assertEqual(window.active_transfer, "upload")
+            self.assertEqual(list(window.queue), [str(source)])
+            self.assertEqual(window.total_bytes, source.stat().st_size)
+            self.assertIn(
+                "Операция: выгрузка",
+                window.current_transfer_panel().terminal.toPlainText(),
+            )
+            fill_worker_slots.assert_called_once()
+
+            window.running = False
+            window.metrics_timer.stop()
+            window.force_exit = True
+            window.close()
 
 
 if __name__ == "__main__":

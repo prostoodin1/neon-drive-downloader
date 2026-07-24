@@ -44,7 +44,15 @@ jobs:
         run: |
           choco install innosetup -y --no-progress
           $version = "${{ github.ref_name }}".TrimStart("v")
-          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" "/DMyAppVersion=$version" "installer.iss"
+          $versionParts = @(
+            [regex]::Matches($version, "\d+") |
+              Select-Object -First 4 |
+              ForEach-Object { $_.Value }
+          )
+          while ($versionParts.Count -lt 4) { $versionParts += "0" }
+          $fileVersion = $versionParts -join "."
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" `
+            "/DMyAppVersion=$version" "/DMyAppFileVersion=$fileVersion" "installer.iss"
 
       - name: Verify artifact
         shell: pwsh
@@ -64,10 +72,15 @@ jobs:
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
-        run: >-
-          gh release create "${{ github.ref_name }}"
-          "dist\NeonDriveDownloader-Setup.exe"
-          "dist\NeonDriveDownloader-Portable.zip"
-          "dist\NeonDriveDownloader.exe"
-          --title "Neon Drive Downloader ${{ github.ref_name }}"
-          --generate-notes
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $arguments = @(
+            "release", "create", $tag,
+            "dist\NeonDriveDownloader-Setup.exe",
+            "dist\NeonDriveDownloader-Portable.zip",
+            "dist\NeonDriveDownloader.exe",
+            "--title", "Neon Drive Downloader $tag",
+            "--generate-notes"
+          )
+          if ($tag.Contains("-")) { $arguments += "--prerelease" }
+          & gh @arguments

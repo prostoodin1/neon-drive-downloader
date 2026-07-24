@@ -1,0 +1,9 @@
+{
+  "schema": 1,
+  "id": "neon-uploader",
+  "name": "Выгрузка на Google Drive",
+  "version": "1.0.0-beta.1",
+  "entry": "builtin:upload",
+  "compatible_app_prefix": "5.4",
+  "description": "Добавляет вкладку для выгрузки локальных файлов и папок в Google Drive, подключённый к Проводнику Windows."
+}

@@ -1,5 +1,81 @@
 # Changelog
 
+## 5.4.0-beta.9
+
+- Persisted every configurable transfer, Rclone, appearance, update, tray, log, and path setting.
+- Added restoration of the active tab using stable page identifiers even when optional tabs change.
+- Added restoration of window geometry, remembered manual size, position, and maximized state.
+- Added an in-app note explaining that settings and layout state are saved automatically.
+- Added a restart-level GUI test covering advanced/files tabs, sidebar state, window size,
+  theme, design, engine, Rclone options, source and destination paths, and active tab.
+
+## 5.4.0-beta.8
+
+- Added an optional Files tab controlled by a live Settings toggle.
+- Added a combined download and upload overview with source, destination, status,
+  per-file progress, transferred bytes, read/download speed, and effective write speed.
+- Kept the overview synchronized with queued, active, completed, failed, and stopped tasks.
+- Added a subtle horizontal page slide when selecting tabs in sidebar navigation mode.
+- Added GUI tests for dynamic tab insertion, aggregated file status, and sidebar slide animation.
+
+## 5.4.0-beta.7
+
+- Moved progress, speed, ETA, state, and the start action inside the Download and Upload pages.
+- Removed the transfer footer from Settings, Advanced mode, and Updates so it no longer follows
+  the user through unrelated pages.
+- Added small, standard, and large window presets plus a mode that remembers a manually resized window.
+- Added a Small screen design mode with tighter headers, controls, cards, and spacing.
+- Added independent Download and Upload status controls and GUI coverage for the new layouts.
+
+## 5.4.0-beta.6
+
+- Added top, expanded sidebar, and initially collapsed sidebar navigation layouts.
+- Added a Codex-style header control that smoothly collapses and restores the sidebar
+  without changing the active page.
+- Smoothed tab fades, sidebar movement, progress updates, and general interface transitions.
+- Added one-click download and connection of the official Windows Rclone executable.
+- Verified the official Rclone ZIP against its release SHA256SUMS before atomically replacing
+  the managed executable under the application data directory.
+
+## 5.4.0-beta.5
+
+- Added selectable Robocopy, Rclone, and safe hybrid copy engines for downloads and uploads.
+- Added Rclone chunk size, multi-thread cutoff, streams, transfers, checkers, buffer,
+  checksum, sparse-file compatibility, and retry controls.
+- Added an optional Advanced mode tab and hid the technical terminal in the simpler default mode.
+- Consolidated appearance controls into Settings and reduced the number of permanent top-level tabs.
+- Added Rclone progress parsing, engine routing tests, and protection against assigning two engines
+  to the same destination item.
+
+## 5.4.0-beta.4
+
+- Converted the upload screen into an optional beta-only add-on controlled from
+  the Updates tab with install, remove, and GitHub actions.
+- Hidden both the upload tab and add-on controls from stable builds.
+- Added compact, comfortable, and minimalist design modes with denser modern
+  buttons, tabs, cards, inputs, and spacing throughout the application.
+- Added manifest validation and isolated add-on storage under the application
+  data directory without touching files already uploaded to Google Drive.
+- Kept the most recently downloaded application installer in a single cache and
+  displayed its version on the Updates tab after restarting the app.
+
+## 5.4.0-beta.3
+
+- Added a dedicated `ВЫГРУЗКА` tab for copying local files and folders to a
+  Google Drive location selected through Windows Explorer.
+- Added independent source, destination, queue preview, terminal, pause, stop,
+  progress, speed, and ETA state for download and upload screens.
+- Kept uploads on Robocopy so Google Drive for desktop remains responsible for
+  caching and safely sending data to the cloud.
+
+## 5.4.0-beta.1
+
+- Added a Turbo profile that reads independent ranges of one large cloud-backed file in parallel.
+- Added a configurable 2–16 Turbo worker slider with an aggregate pressure limit across active files.
+- Added resumable `.neon-part` checkpoints for fully completed file segments.
+- Kept fast Robocopy as the automatic Turbo fallback for folders and multi-file trees.
+- Preserved pause, resume, stop, progress, speed, and ETA behavior for segmented copies.
+
 ## 5.3.0
 
 - Increased contrast for all application text and fixed unreadable QMessageBox dialogs.

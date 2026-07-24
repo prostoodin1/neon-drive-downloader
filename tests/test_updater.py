@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import tempfile
 import unittest
 from pathlib import Path
@@ -9,10 +10,11 @@ from neon_drive import __version__
 from neon_drive import updater
 
 
-def release_payload(tag: str, assets: list[str]) -> dict:
+def release_payload(tag: str, assets: list[str], prerelease: bool = False) -> dict:
     return {
         "tag_name": tag,
         "name": tag,
+        "prerelease": prerelease,
         "assets": [
             {
                 "name": name,
@@ -24,6 +26,52 @@ def release_payload(tag: str, assets: list[str]) -> dict:
 
 
 class UpdaterTests(unittest.TestCase):
+    def test_last_downloaded_release_is_kept_in_single_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            release = {
+                "tag": "v5.4.0-beta.4",
+                "version": "5.4.0-beta.4",
+                "asset_name": updater.SETUP_ASSET_NAME,
+                "asset_url": "https://example.invalid/setup.exe",
+                "method": "public",
+            }
+            payload = io.BytesIO(b"n" * 1_000_001)
+            with (
+                patch.object(updater, "app_data_dir", return_value=root),
+                patch.object(updater.urllib.request, "urlopen", return_value=payload),
+            ):
+                downloaded = updater.download_release(release)
+                cached = updater.last_downloaded_release()
+
+            self.assertEqual(downloaded.parent.name, updater.LAST_DOWNLOAD_DIRECTORY)
+            self.assertTrue(downloaded.is_file())
+            self.assertIsNotNone(cached)
+            self.assertEqual(cached["version"], "5.4.0-beta.4")
+            self.assertEqual(Path(cached["path"]), downloaded)
+
+    def test_prerelease_orders_before_matching_stable_version(self) -> None:
+        self.assertLess(
+            updater.version_tuple("v5.4.0-beta.1"),
+            updater.version_tuple("v5.4.0"),
+        )
+        self.assertLess(
+            updater.version_tuple("v5.4.0-beta.1"),
+            updater.version_tuple("v5.4.0-beta.2"),
+        )
+
+    def test_beta_release_is_marked_for_manual_history(self) -> None:
+        release = updater._normalize_release(
+            release_payload(
+                "v5.4.0-beta.1",
+                [updater.SETUP_ASSET_NAME],
+                prerelease=True,
+            ),
+            "public",
+        )
+        self.assertTrue(release["prerelease"])
+        self.assertEqual(release["version"], "5.4.0-beta.1")
+
     def test_release_prefers_installer_over_legacy_onefile(self) -> None:
         release = updater._normalize_release(
             release_payload(
@@ -68,7 +116,30 @@ class UpdaterTests(unittest.TestCase):
             contents = script.read_text(encoding="utf-8-sig")
             self.assertIn("/VERYSILENT", contents)
             self.assertIn("NeonDriveDownloader.exe", contents)
+            self.assertNotIn("Remove-Item -LiteralPath $Source", contents)
             popen.assert_called_once()
+
+    def test_onefile_update_uses_copy_and_keeps_cached_exe(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            downloaded = root / updater.LEGACY_ASSET_NAME
+            downloaded.write_bytes(b"cached-update")
+            current = root / "Portable" / updater.LEGACY_ASSET_NAME
+            current.parent.mkdir()
+            current.write_bytes(b"current")
+
+            with (
+                patch.object(updater.sys, "frozen", True, create=True),
+                patch.object(updater, "bootloader_parent_pid", return_value=4242),
+                patch.object(updater.subprocess, "Popen") as popen,
+            ):
+                updater.launch_replacement(downloaded, current)
+
+            replacement = root / f"apply-{updater.LEGACY_ASSET_NAME}"
+            self.assertTrue(downloaded.is_file())
+            self.assertEqual(replacement.read_bytes(), downloaded.read_bytes())
+            arguments = popen.call_args.args[0]
+            self.assertEqual(arguments[arguments.index("-Source") + 1], str(replacement))
 
 
 if __name__ == "__main__":

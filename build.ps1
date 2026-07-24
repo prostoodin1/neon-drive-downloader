@@ -19,6 +19,13 @@ if (Test-Path -LiteralPath $portable) { Remove-Item -LiteralPath $portable -Forc
 Compress-Archive -Path "dist\NeonDriveDownloader\*" -DestinationPath $portable -CompressionLevel Optimal
 
 $version = & $python -c "from neon_drive import __version__; print(__version__)"
+$versionParts = @(
+    [regex]::Matches($version, "\d+") |
+        Select-Object -First 4 |
+        ForEach-Object { $_.Value }
+)
+while ($versionParts.Count -lt 4) { $versionParts += "0" }
+$fileVersion = $versionParts -join "."
 $isccCandidates = @(
     (Join-Path $env:LOCALAPPDATA "Programs\Inno Setup 6\ISCC.exe"),
     (Join-Path ${env:ProgramFiles(x86)} "Inno Setup 6\ISCC.exe"),
@@ -26,7 +33,7 @@ $isccCandidates = @(
 )
 $iscc = $isccCandidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
 if ($iscc) {
-    & $iscc "/DMyAppVersion=$version" "installer.iss"
+    & $iscc "/DMyAppVersion=$version" "/DMyAppFileVersion=$fileVersion" "installer.iss"
     if ($LASTEXITCODE -ne 0) { throw "Installer build failed." }
 } else {
     Write-Warning "Inno Setup 6 is not installed; the Setup EXE was skipped locally."

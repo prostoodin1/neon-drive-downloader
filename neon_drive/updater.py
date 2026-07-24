@@ -8,6 +8,7 @@ import subprocess
 import sys
 import urllib.error
 import urllib.request
+from datetime import datetime, timezone
 from pathlib import Path
 
 import psutil
@@ -22,6 +23,8 @@ LEGACY_ASSET_NAME = "NeonDriveDownloader.exe"
 ASSET_NAMES = (SETUP_ASSET_NAME, LEGACY_ASSET_NAME)
 API_URL = f"https://api.github.com/repos/{REPOSITORY}/releases/latest"
 RELEASES_URL = f"https://api.github.com/repos/{REPOSITORY}/releases?per_page=20"
+LAST_DOWNLOAD_DIRECTORY = "last-download"
+LAST_DOWNLOAD_METADATA = "release.json"
 
 
 def app_data_dir() -> Path:
@@ -30,8 +33,19 @@ def app_data_dir() -> Path:
 
 
 def version_tuple(value: str) -> tuple[int, ...]:
-    numbers = re.findall(r"\d+", value.lstrip("vV"))
-    return tuple(int(number) for number in numbers[:4]) or (0,)
+    raw = value.lstrip("vV").split("+", 1)[0]
+    core, separator, prerelease = raw.partition("-")
+    numbers = [int(number) for number in re.findall(r"\d+", core)[:4]]
+    while len(numbers) < 3:
+        numbers.append(0)
+    if not numbers:
+        numbers = [0, 0, 0]
+    if not separator:
+        return (*numbers, 1)
+    label = prerelease.casefold()
+    rank = 2 if "rc" in label else 1 if "beta" in label else 0
+    suffix_numbers = tuple(int(number) for number in re.findall(r"\d+", prerelease)) or (0,)
+    return (*numbers, 0, rank, *suffix_numbers)
 
 
 def running_onefile() -> bool:
@@ -117,6 +131,7 @@ def _normalize_release(data: dict, method: str) -> dict:
         "asset_url": asset.get("browser_download_url") or "",
         "asset_name": asset_name,
         "method": method,
+        "prerelease": bool(data.get("prerelease")),
         "available": version_tuple(tag) > version_tuple(__version__) or migration,
         "migration": migration,
         "current_version": __version__,
@@ -147,14 +162,40 @@ def release_history() -> list[dict]:
     return releases
 
 
+def last_downloaded_release() -> dict | None:
+    cache_dir = app_data_dir() / "updates" / LAST_DOWNLOAD_DIRECTORY
+    metadata_path = cache_dir / LAST_DOWNLOAD_METADATA
+    try:
+        data = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    asset_name = str(data.get("asset_name") or "")
+    if asset_name not in ASSET_NAMES:
+        return None
+    cached_file = cache_dir / asset_name
+    if not cached_file.is_file() or cached_file.stat().st_size < 1_000_000:
+        return None
+    return {
+        "tag": str(data.get("tag") or ""),
+        "version": str(data.get("version") or data.get("tag") or "").lstrip("vV"),
+        "asset_name": asset_name,
+        "downloaded_at": str(data.get("downloaded_at") or ""),
+        "path": str(cached_file),
+    }
+
+
 def download_release(release: dict) -> Path:
     update_dir = app_data_dir() / "updates"
     update_dir.mkdir(parents=True, exist_ok=True)
     asset_name = str(release.get("asset_name") or LEGACY_ASSET_NAME)
     if asset_name not in ASSET_NAMES:
         raise RuntimeError("GitHub Release содержит неподдерживаемый формат обновления.")
-    destination = update_dir / asset_name
-    destination.unlink(missing_ok=True)
+    staging_dir = update_dir / "downloading"
+    staging_dir.mkdir(parents=True, exist_ok=True)
+    staged = staging_dir / asset_name
+    staged.unlink(missing_ok=True)
     if release.get("method") == "gh":
         executable = gh_path()
         if not executable:
@@ -170,7 +211,7 @@ def download_release(release: dict) -> Path:
                 "--pattern",
                 asset_name,
                 "--dir",
-                str(update_dir),
+                str(staging_dir),
                 "--clobber",
             ],
             capture_output=True,
@@ -187,10 +228,31 @@ def download_release(release: dict) -> Path:
             release["asset_url"],
             headers={"User-Agent": "NeonDriveDownloader"},
         )
-        with urllib.request.urlopen(request, timeout=60) as response, destination.open("wb") as stream:
+        with urllib.request.urlopen(request, timeout=60) as response, staged.open("wb") as stream:
             shutil.copyfileobj(response, stream)
-    if not destination.is_file() or destination.stat().st_size < 1_000_000:
+    if not staged.is_file() or staged.stat().st_size < 1_000_000:
         raise RuntimeError("Загруженный файл обновления отсутствует или повреждён.")
+    cache_dir = update_dir / LAST_DOWNLOAD_DIRECTORY
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    destination = cache_dir / asset_name
+    destination.unlink(missing_ok=True)
+    staged.replace(destination)
+    for old_asset in ASSET_NAMES:
+        if old_asset != asset_name:
+            (cache_dir / old_asset).unlink(missing_ok=True)
+    metadata = {
+        "tag": str(release.get("tag") or release.get("version") or ""),
+        "version": str(release.get("version") or release.get("tag") or "").lstrip("vV"),
+        "asset_name": asset_name,
+        "downloaded_at": datetime.now(timezone.utc).isoformat(),
+    }
+    metadata_path = cache_dir / LAST_DOWNLOAD_METADATA
+    metadata_temporary = metadata_path.with_suffix(".download")
+    metadata_temporary.write_text(
+        json.dumps(metadata, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    metadata_temporary.replace(metadata_path)
     return destination
 
 
@@ -236,7 +298,6 @@ if($installer.ExitCode -ne 0){exit $installer.ExitCode}
 $target = Join-Path $InstallDir 'NeonDriveDownloader.exe'
 if(!(Test-Path -LiteralPath $target)){exit 2}
 Start-Process -FilePath $target
-Remove-Item -LiteralPath $Source -Force -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath $ScriptPath -Force -ErrorAction SilentlyContinue
 exit 0
 """,
@@ -267,6 +328,9 @@ exit 0
         return
     if not os.access(current_executable.parent, os.W_OK):
         raise RuntimeError("Нет прав на замену EXE в текущей папке.")
+    replacement = downloaded.with_name(f"apply-{downloaded.name}")
+    replacement.unlink(missing_ok=True)
+    shutil.copy2(downloaded, replacement)
     script = downloaded.parent / "apply-update.ps1"
     script.write_text(
         """param([string]$Source,[string]$Target,[int]$PidToWait,[string]$ScriptPath)
@@ -302,9 +366,9 @@ exit 1
             "-ExecutionPolicy",
             "Bypass",
             "-File",
-            str(script),
-            "-Source",
-            str(downloaded),
+                str(script),
+                "-Source",
+                str(replacement),
             "-Target",
             str(current_executable),
             "-PidToWait",
