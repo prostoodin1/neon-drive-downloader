@@ -297,6 +297,7 @@ class StopAfterCurrentFileTests(unittest.TestCase):
     def test_navigation_can_move_left_and_collapse_without_changing_page(self) -> None:
         window = MainWindow()
         window.notifications_check.setChecked(False)
+        window.animations_check.setChecked(True)
         window.navigation_mode_combo.setCurrentIndex(
             window.navigation_mode_combo.findData("top")
         )
@@ -316,6 +317,14 @@ class StopAfterCurrentFileTests(unittest.TestCase):
             window.tabs.tabBar().tabSizeHint(0).height(),
         )
 
+        window.files_tab_check.setChecked(True)
+        window.tabs.setCurrentWidget(window.files_page)
+        QApplication.processEvents()
+        self.assertIsNotNone(window.tab_slide_animation)
+        self.assertEqual(window.tab_slide_animation.propertyName(), b"pos")
+        self.assertEqual(window.tab_slide_animation.duration(), 280)
+        page = window.tabs.currentWidget()
+
         window.set_navigation_panel_expanded(False, animate=False)
         self.assertTrue(window.tabs.tabBar().isHidden())
         self.assertIs(window.tabs.currentWidget(), page)
@@ -326,8 +335,143 @@ class StopAfterCurrentFileTests(unittest.TestCase):
         window.navigation_mode_combo.setCurrentIndex(
             window.navigation_mode_combo.findData("top")
         )
+        window.files_tab_check.setChecked(False)
         window.force_exit = True
         window.close()
+
+    def test_optional_files_tab_aggregates_download_and_upload_status(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            download_source = root / "cloud.bin"
+            upload_source = root / "local.bin"
+            download_source.write_bytes(b"d" * 100)
+            upload_source.write_bytes(b"u" * 80)
+            download_destination = root / "Downloads"
+            upload_destination = root / "Google Drive"
+
+            window = MainWindow()
+            window.notifications_check.setChecked(False)
+            window.animations_check.setChecked(False)
+            window.files_tab_check.setChecked(False)
+            self.assertEqual(window.tabs.indexOf(window.files_page), -1)
+
+            window.sources.setPlainText(str(download_source))
+            window.destination.setText(str(download_destination))
+            window.upload_sources.setPlainText(str(upload_source))
+            window.upload_destination.setText(str(upload_destination))
+            window.files_tab_check.setChecked(True)
+
+            self.assertGreaterEqual(window.tabs.indexOf(window.files_page), 0)
+            self.assertIn(("download", str(download_source)), window.files_overview_rows)
+            self.assertIn(("upload", str(upload_source)), window.files_overview_rows)
+            self.assertIn("ФАЙЛОВ: 2", window.files_summary_label.text())
+
+            task = TaskInfo(
+                source=str(download_source),
+                size=100,
+                downloaded=25,
+                speed=4 * 1024 * 1024,
+                status="ЗАГРУЗКА",
+            )
+            window.tasks = {str(download_source): task}
+            window.running = True
+            window.bind_transfer_panel("download")
+            window.refresh_files_overview()
+            row = window.files_overview_rows[("download", str(download_source))]
+            self.assertEqual(row.progress.value(), 250)
+            self.assertEqual(row.status.text(), "ЗАГРУЗКА")
+            self.assertIn("4.0 МБ/с", row.read_speed_label.text())
+            self.assertIn("4.0 МБ/с", row.write_speed_label.text())
+            self.assertEqual(row.source_button.text(), str(download_source))
+            self.assertEqual(row.destination_button.text(), str(download_destination / "cloud.bin"))
+
+            window.running = False
+            window.tasks.clear()
+            window.sources.clear()
+            window.upload_sources.clear()
+            window.files_tab_check.setChecked(False)
+            window.force_exit = True
+            window.close()
+
+    def test_all_settings_geometry_and_active_tab_survive_restart(self) -> None:
+        window = MainWindow()
+        window.notifications_check.setChecked(False)
+        window.advanced_mode_check.setChecked(True)
+        window.files_tab_check.setChecked(True)
+        window.navigation_mode_combo.setCurrentIndex(
+            window.navigation_mode_combo.findData("side_compact")
+        )
+        window.set_navigation_panel_expanded(False, animate=False)
+        window.window_size_combo.setCurrentIndex(
+            window.window_size_combo.findData("remember")
+        )
+        window.resize(1010, 720)
+        window.move(42, 57)
+        window.theme_combo.setCurrentIndex(window.theme_combo.findData("dark"))
+        window.design_mode_combo.setCurrentIndex(window.design_mode_combo.findData("small"))
+        window.copy_engine_combo.setCurrentIndex(
+            window.copy_engine_combo.findData("rclone")
+        )
+        window.rclone_chunk_combo.setCurrentIndex(
+            window.rclone_chunk_combo.findData(128)
+        )
+        window.rclone_checksum_check.setChecked(True)
+        window.sources.setPlainText(r"G:\Remembered\cloud.bin")
+        window.destination.setText(r"D:\Remembered Downloads")
+        window.upload_sources.setPlainText(r"D:\Remembered\local.bin")
+        window.upload_destination.setText(r"G:\Remembered Uploads")
+        window.tabs.setCurrentWidget(window.files_page)
+        window.persist_settings()
+        window.force_exit = True
+        window.close()
+
+        restored = MainWindow()
+        restored.notifications_check.setChecked(False)
+        self.assertTrue(restored.advanced_mode_check.isChecked())
+        self.assertTrue(restored.files_tab_check.isChecked())
+        self.assertEqual(restored.navigation_mode_combo.currentData(), "side_compact")
+        self.assertFalse(restored.sidebar_expanded)
+        self.assertEqual(restored.window_size_combo.currentData(), "remember")
+        self.assertEqual((restored.width(), restored.height()), (1010, 720))
+        self.assertEqual(restored.theme_combo.currentData(), "dark")
+        self.assertEqual(restored.design_mode_combo.currentData(), "small")
+        self.assertEqual(restored.copy_engine_combo.currentData(), "rclone")
+        self.assertEqual(restored.rclone_chunk_combo.currentData(), 128)
+        self.assertTrue(restored.rclone_checksum_check.isChecked())
+        self.assertEqual(restored.sources.toPlainText(), r"G:\Remembered\cloud.bin")
+        self.assertEqual(restored.destination.text(), r"D:\Remembered Downloads")
+        self.assertEqual(restored.upload_sources.toPlainText(), r"D:\Remembered\local.bin")
+        self.assertEqual(restored.upload_destination.text(), r"G:\Remembered Uploads")
+        self.assertIs(restored.tabs.currentWidget(), restored.files_page)
+        self.assertTrue(restored.settings.value("window_geometry"))
+
+        restored.advanced_mode_check.setChecked(False)
+        restored.files_tab_check.setChecked(False)
+        restored.navigation_mode_combo.setCurrentIndex(
+            restored.navigation_mode_combo.findData("top")
+        )
+        restored.window_size_combo.setCurrentIndex(
+            restored.window_size_combo.findData("standard")
+        )
+        restored.theme_combo.setCurrentIndex(restored.theme_combo.findData("oled"))
+        restored.design_mode_combo.setCurrentIndex(
+            restored.design_mode_combo.findData("compact")
+        )
+        restored.copy_engine_combo.setCurrentIndex(
+            restored.copy_engine_combo.findData("robocopy")
+        )
+        restored.rclone_chunk_combo.setCurrentIndex(
+            restored.rclone_chunk_combo.findData(64)
+        )
+        restored.rclone_checksum_check.setChecked(False)
+        restored.sources.clear()
+        restored.destination.setText(str(Path.home() / "Downloads"))
+        restored.upload_sources.clear()
+        restored.upload_destination.clear()
+        restored.tabs.setCurrentWidget(restored.download_page)
+        restored.persist_settings()
+        restored.force_exit = True
+        restored.close()
 
     def test_design_modes_are_compact_by_default_and_switch_live(self) -> None:
         window = MainWindow()

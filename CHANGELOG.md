@@ -1,5 +1,23 @@
 # Changelog
 
+## 5.4.0-beta.9
+
+- Persisted every configurable transfer, Rclone, appearance, update, tray, log, and path setting.
+- Added restoration of the active tab using stable page identifiers even when optional tabs change.
+- Added restoration of window geometry, remembered manual size, position, and maximized state.
+- Added an in-app note explaining that settings and layout state are saved automatically.
+- Added a restart-level GUI test covering advanced/files tabs, sidebar state, window size,
+  theme, design, engine, Rclone options, source and destination paths, and active tab.
+
+## 5.4.0-beta.8
+
+- Added an optional Files tab controlled by a live Settings toggle.
+- Added a combined download and upload overview with source, destination, status,
+  per-file progress, transferred bytes, read/download speed, and effective write speed.
+- Kept the overview synchronized with queued, active, completed, failed, and stopped tasks.
+- Added a subtle horizontal page slide when selecting tabs in sidebar navigation mode.
+- Added GUI tests for dynamic tab insertion, aggregated file status, and sidebar slide animation.
+
 ## 5.4.0-beta.7
 
 - Moved progress, speed, ETA, state, and the start action inside the Download and Upload pages.
