@@ -8,9 +8,10 @@ from pathlib import Path
 from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+os.environ.setdefault("NEON_DRIVE_DISABLE_AUTO_UPDATE", "1")
 
 from PySide6.QtCore import QSettings
-from PySide6.QtWidgets import QApplication, QLabel
+from PySide6.QtWidgets import QApplication, QLabel, QTabWidget
 
 from neon_drive.addons import UPLOAD_ADDON_FILE
 from neon_drive.app import (
@@ -18,6 +19,7 @@ from neon_drive.app import (
     MAX_TURBO_THREADS,
     Downloader,
     MainWindow,
+    RcloneDownloader,
     TaskInfo,
     TurboFileDownloader,
     destination_collisions,
@@ -70,6 +72,17 @@ class ProgressParserTests(unittest.TestCase):
         downloader._handle_output_line("41.0%")
 
         self.assertEqual(samples, [400, 410])
+
+    def test_rclone_progress_is_converted_to_item_bytes(self) -> None:
+        downloader = RcloneDownloader()
+        downloader.current = r"G:\Drive\large.bin"
+        downloader.expected_bytes = 1_000
+        samples: list[int] = []
+        downloader.progress.connect(lambda _source, _percent, size: samples.append(int(size)))
+
+        downloader._handle_output_line("Transferred: 500 B / 1000 B, 50%, 5 MiB/s, ETA 0s")
+
+        self.assertEqual(samples, [500])
 
 
 class StopAfterCurrentFileTests(unittest.TestCase):
@@ -264,6 +277,58 @@ class StopAfterCurrentFileTests(unittest.TestCase):
         window.force_exit = True
         window.close()
 
+    def test_advanced_mode_adds_tab_and_reveals_terminal(self) -> None:
+        window = MainWindow()
+        window.notifications_check.setChecked(False)
+        window.advanced_mode_check.setChecked(False)
+        window.update_settings_visibility()
+        self.assertEqual(window.tabs.indexOf(window.advanced_page), -1)
+        self.assertFalse(window.transfer_panels["download"].terminal_card.isVisible())
+
+        window.advanced_mode_check.setChecked(True)
+        window.update_settings_visibility()
+        self.assertGreaterEqual(window.tabs.indexOf(window.advanced_page), 0)
+        self.assertFalse(window.transfer_panels["download"].terminal_card.isHidden())
+
+        window.advanced_mode_check.setChecked(False)
+        window.force_exit = True
+        window.close()
+
+    def test_navigation_can_move_left_and_collapse_without_changing_page(self) -> None:
+        window = MainWindow()
+        window.notifications_check.setChecked(False)
+        window.navigation_mode_combo.setCurrentIndex(
+            window.navigation_mode_combo.findData("top")
+        )
+        window.update_settings_visibility()
+        self.assertEqual(window.tabs.tabPosition(), QTabWidget.TabPosition.North)
+        self.assertTrue(window.navigation_toggle_button.isHidden())
+
+        window.navigation_mode_combo.setCurrentIndex(
+            window.navigation_mode_combo.findData("side")
+        )
+        window.update_settings_visibility()
+        page = window.tabs.currentWidget()
+        self.assertEqual(window.tabs.tabPosition(), QTabWidget.TabPosition.West)
+        self.assertFalse(window.navigation_toggle_button.isHidden())
+        self.assertGreater(
+            window.tabs.tabBar().tabSizeHint(0).width(),
+            window.tabs.tabBar().tabSizeHint(0).height(),
+        )
+
+        window.set_navigation_panel_expanded(False, animate=False)
+        self.assertTrue(window.tabs.tabBar().isHidden())
+        self.assertIs(window.tabs.currentWidget(), page)
+        window.set_navigation_panel_expanded(True, animate=False)
+        self.assertFalse(window.tabs.tabBar().isHidden())
+        self.assertIs(window.tabs.currentWidget(), page)
+
+        window.navigation_mode_combo.setCurrentIndex(
+            window.navigation_mode_combo.findData("top")
+        )
+        window.force_exit = True
+        window.close()
+
     def test_design_modes_are_compact_by_default_and_switch_live(self) -> None:
         window = MainWindow()
         window.notifications_check.setChecked(False)
@@ -323,6 +388,43 @@ class StopAfterCurrentFileTests(unittest.TestCase):
             window.force_exit = True
             window.close()
 
+    def test_rclone_mode_uses_rclone_worker_and_selected_options(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "large.bin"
+            source.write_bytes(b"neon-rclone")
+            destination = root / "downloads"
+            destination.mkdir()
+
+            window = MainWindow()
+            window.notifications_check.setChecked(False)
+            window.destination.setText(str(destination))
+            window.tasks = {str(source): TaskInfo(str(source), source.stat().st_size)}
+            window.copy_engine_combo.setCurrentIndex(
+                window.copy_engine_combo.findData("rclone")
+            )
+            window.rclone_executable = "rclone.exe"
+            options = window.selected_rclone_options()
+
+            with patch.object(RcloneDownloader, "start_item") as start_item:
+                window.start_task(str(source))
+
+            worker = window.workers.pop(str(source))
+            self.assertIsInstance(worker, RcloneDownloader)
+            start_item.assert_called_once_with(
+                "rclone.exe",
+                str(source),
+                destination,
+                options,
+                source.stat().st_size,
+            )
+            window.copy_engine_combo.setCurrentIndex(
+                window.copy_engine_combo.findData("robocopy")
+            )
+            worker.deleteLater()
+            window.force_exit = True
+            window.close()
+
     def test_manual_release_list_marks_beta_versions(self) -> None:
         window = MainWindow()
         window.notifications_check.setChecked(False)
@@ -357,9 +459,9 @@ class StopAfterCurrentFileTests(unittest.TestCase):
             window = MainWindow()
             window.notifications_check.setChecked(False)
             window.tabs.setCurrentIndex(window.upload_tab_index)
-            self.assertEqual(window.tabs.tabText(window.upload_tab_index), "ВЫГРУЗКА")
+            self.assertEqual(window.tabs.tabText(window.upload_tab_index), "Выгрузка")
             self.assertEqual(window.active_transfer, "upload")
-            self.assertEqual(window.start_button.text(), "НАЧАТЬ ВЫГРУЗКУ")
+            self.assertEqual(window.start_button.text(), "Начать выгрузку")
             self.assertIn("1.0.0-beta.1", window.addon_status_badge.text())
 
             window.upload_sources.setPlainText(str(source))

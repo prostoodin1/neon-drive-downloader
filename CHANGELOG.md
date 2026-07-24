@@ -1,5 +1,25 @@
 # Changelog
 
+## 5.4.0-beta.6
+
+- Added top, expanded sidebar, and initially collapsed sidebar navigation layouts.
+- Added a Codex-style header control that smoothly collapses and restores the sidebar
+  without changing the active page.
+- Smoothed tab fades, sidebar movement, progress updates, and general interface transitions.
+- Added one-click download and connection of the official Windows Rclone executable.
+- Verified the official Rclone ZIP against its release SHA256SUMS before atomically replacing
+  the managed executable under the application data directory.
+
+## 5.4.0-beta.5
+
+- Added selectable Robocopy, Rclone, and safe hybrid copy engines for downloads and uploads.
+- Added Rclone chunk size, multi-thread cutoff, streams, transfers, checkers, buffer,
+  checksum, sparse-file compatibility, and retry controls.
+- Added an optional Advanced mode tab and hid the technical terminal in the simpler default mode.
+- Consolidated appearance controls into Settings and reduced the number of permanent top-level tabs.
+- Added Rclone progress parsing, engine routing tests, and protection against assigning two engines
+  to the same destination item.
+
 ## 5.4.0-beta.4
 
 - Converted the upload screen into an optional beta-only add-on controlled from
