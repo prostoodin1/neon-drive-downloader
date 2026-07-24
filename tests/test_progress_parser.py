@@ -339,12 +339,53 @@ class StopAfterCurrentFileTests(unittest.TestCase):
             window.design_mode_combo.itemData(index)
             for index in range(window.design_mode_combo.count())
         }
-        self.assertEqual(modes, {"compact", "comfortable", "minimal"})
+        self.assertEqual(modes, {"small", "compact", "comfortable", "minimal"})
+
+        window.design_mode_combo.setCurrentIndex(
+            window.design_mode_combo.findData("small")
+        )
+        self.assertEqual(window.start_button.minimumHeight(), 38)
+        self.assertEqual(
+            window.transfer_panels["upload"].start_button.minimumHeight(), 38
+        )
 
         window.design_mode_combo.setCurrentIndex(
             window.design_mode_combo.findData("comfortable")
         )
         self.assertEqual(window.start_button.minimumHeight(), 52)
+        window.design_mode_combo.setCurrentIndex(
+            window.design_mode_combo.findData("compact")
+        )
+        window.force_exit = True
+        window.close()
+
+    def test_window_presets_and_transfer_pages_own_their_status_controls(self) -> None:
+        window = MainWindow()
+        window.notifications_check.setChecked(False)
+        download = window.transfer_panels["download"]
+        upload = window.transfer_panels["upload"]
+
+        self.assertIsNot(download.start_button, upload.start_button)
+        self.assertIsNot(download.progress, upload.progress)
+        self.assertTrue(window.download_page.isAncestorOf(download.start_button))
+        self.assertTrue(window.upload_page.isAncestorOf(upload.start_button))
+        self.assertFalse(window.settings_page.isAncestorOf(download.status_card))
+        self.assertFalse(window.updates_page.isAncestorOf(upload.status_card))
+        self.assertEqual(download.start_button.text(), "Начать загрузку")
+        self.assertEqual(upload.start_button.text(), "Начать выгрузку")
+
+        window.window_size_combo.setCurrentIndex(
+            window.window_size_combo.findData("small")
+        )
+        self.assertEqual((window.width(), window.height()), (960, 700))
+        window.window_size_combo.setCurrentIndex(
+            window.window_size_combo.findData("large")
+        )
+        self.assertEqual((window.width(), window.height()), (1480, 980))
+
+        window.window_size_combo.setCurrentIndex(
+            window.window_size_combo.findData("standard")
+        )
         window.force_exit = True
         window.close()
 

@@ -1,5 +1,14 @@
 # Changelog
 
+## 5.4.0-beta.7
+
+- Moved progress, speed, ETA, state, and the start action inside the Download and Upload pages.
+- Removed the transfer footer from Settings, Advanced mode, and Updates so it no longer follows
+  the user through unrelated pages.
+- Added small, standard, and large window presets plus a mode that remembers a manually resized window.
+- Added a Small screen design mode with tighter headers, controls, cards, and spacing.
+- Added independent Download and Upload status controls and GUI coverage for the new layouts.
+
 ## 5.4.0-beta.6
 
 - Added top, expanded sidebar, and initially collapsed sidebar navigation layouts.
