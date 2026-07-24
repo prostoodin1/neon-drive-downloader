@@ -116,6 +116,11 @@ class StopAfterCurrentFileTests(unittest.TestCase):
             os.environ["NEON_DRIVE_ADDON_DIR"] = cls.previous_addon_dir
         cls.temp_settings.cleanup()
 
+    def setUp(self) -> None:
+        isolated_settings = QSettings("NeonTools", "Neon Drive Downloader")
+        isolated_settings.clear()
+        isolated_settings.sync()
+
     def test_selected_current_file_stops_remaining_parallel_worker(self) -> None:
         window = MainWindow()
         window.notifications_check.setChecked(False)
@@ -273,6 +278,22 @@ class StopAfterCurrentFileTests(unittest.TestCase):
         window.update_settings_visibility()
         self.assertTrue(window.turbo_threads_controls.isEnabled())
         self.assertEqual(window.turbo_threads_slider.maximum(), MAX_TURBO_THREADS)
+
+        window.force_exit = True
+        window.close()
+
+    def test_rclone_and_hybrid_modes_use_only_one_process(self) -> None:
+        window = MainWindow()
+        window.notifications_check.setChecked(False)
+        all_index = window.download_mode_combo.findData("all")
+        window.download_mode_combo.setCurrentIndex(all_index)
+        window.total_items = 3
+
+        for engine in ("rclone", "hybrid"):
+            engine_index = window.copy_engine_combo.findData(engine)
+            window.copy_engine_combo.setCurrentIndex(engine_index)
+            self.assertEqual(window.max_concurrent_downloads(), 1)
+            self.assertEqual(window.download_mode_combo.currentData(), "sequential")
 
         window.force_exit = True
         window.close()

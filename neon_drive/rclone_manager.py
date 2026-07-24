@@ -5,6 +5,7 @@ import io
 import json
 import os
 import re
+import time
 import urllib.request
 import zipfile
 from collections.abc import Callable
@@ -17,6 +18,25 @@ MAX_TEXT_BYTES = 256 * 1024
 MAX_ARCHIVE_BYTES = 100 * 1024 * 1024
 MAX_EXECUTABLE_BYTES = 80 * 1024 * 1024
 ProgressCallback = Callable[[int, str], None]
+
+
+def _replace_executable(temporary: Path, target: Path) -> None:
+    last_error: OSError | None = None
+    for attempt in range(6):
+        try:
+            temporary.replace(target)
+            return
+        except OSError as exc:
+            locked = isinstance(exc, PermissionError) or getattr(exc, "winerror", None) in (5, 32)
+            if not locked:
+                raise
+            last_error = exc
+            if attempt < 5:
+                time.sleep(0.25)
+    raise RuntimeError(
+        "Rclone сейчас используется другим процессом. Остановите все загрузки и выгрузки, "
+        "закройте оставшийся rclone.exe в диспетчере задач и повторите обновление."
+    ) from last_error
 
 
 def rclone_install_directory() -> Path:
@@ -145,7 +165,7 @@ def download_and_install_rclone(
             with temporary.open("rb") as executable:
                 if executable.read(2) != b"MZ":
                     raise RuntimeError("Извлечённый файл не является Windows-приложением.")
-            temporary.replace(target)
+            _replace_executable(temporary, target)
         finally:
             temporary.unlink(missing_ok=True)
 

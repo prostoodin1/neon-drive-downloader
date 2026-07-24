@@ -1,5 +1,11 @@
 # Changelog
 
+## 5.4.0-beta.10
+
+- Limited Rclone and hybrid transfers to one Rclone process at a time while keeping
+  multi-threaded transfer inside that process.
+- Blocked managed Rclone updates while an active transfer is still using `rclone.exe`.
+
 ## 5.4.0-beta.9
 
 - Persisted every configurable transfer, Rclone, appearance, update, tray, log, and path setting.

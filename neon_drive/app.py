@@ -2179,6 +2179,8 @@ class MainWindow(QMainWindow):
         select(self.download_mode_combo, self.settings.value(
             "download_mode", "all" if old_parallel else "sequential"
         ))
+        if self.copy_engine_combo.currentData() in ("rclone", "hybrid"):
+            select(self.download_mode_combo, "sequential")
         self.concurrency_spin.setValue(self.settings.value("concurrency", 3, type=int))
         select(self.copy_profile_combo, self.settings.value("copy_profile", "optimized"))
         self.directory_threads_slider.setValue(
@@ -2355,6 +2357,12 @@ class MainWindow(QMainWindow):
         self.settings.sync()
 
     def settings_changed(self, *_args) -> None:
+        if self.sender() is self.copy_engine_combo:
+            engine = str(self.copy_engine_combo.currentData() or "robocopy")
+            if engine in ("rclone", "hybrid"):
+                sequential = self.download_mode_combo.findData("sequential")
+                if sequential >= 0:
+                    self.download_mode_combo.setCurrentIndex(sequential)
         if self.sender() is self.accent_combo:
             self.accent_color = str(self.accent_combo.currentData())
         if self.sender() is self.navigation_mode_combo:
@@ -2389,10 +2397,28 @@ class MainWindow(QMainWindow):
         self.set_advanced_mode_visible(self.advanced_mode_check.isChecked())
         self.set_files_tab_visible(self.files_tab_check.isChecked())
         self.apply_navigation_layout(animate=False)
-        limited = self.download_mode_combo.currentData() == "limited" and not self.running
+        engine = str(self.copy_engine_combo.currentData() or "robocopy")
+        single_rclone_process = engine in ("rclone", "hybrid")
+        self.download_mode_combo.setEnabled(not single_rclone_process and not self.running)
+        self.download_mode_combo.setToolTip(
+            "Для Rclone используется только один процесс: файлы идут строго по очереди."
+            if single_rclone_process
+            else ""
+        )
+        limited = (
+            self.download_mode_combo.currentData() == "limited"
+            and not self.running
+            and not single_rclone_process
+        )
         self.concurrency_controls.setEnabled(limited)
         self.concurrency_controls.setToolTip(
-            "" if limited else "Число файлов задаётся только в ограниченном режиме."
+            ""
+            if limited
+            else (
+                "Для Rclone используется только один процесс."
+                if single_rclone_process
+                else "Число файлов задаётся только в ограниченном режиме."
+            )
         )
         profile = str(self.copy_profile_combo.currentData() or "optimized")
         profile_notes = {
@@ -2425,7 +2451,6 @@ class MainWindow(QMainWindow):
         self.directory_threads_controls.setToolTip(
             "" if threaded_profile else "Число внутренних потоков используется в ускоренных профилях."
         )
-        engine = str(self.copy_engine_combo.currentData() or "robocopy")
         rclone_selected = engine in ("rclone", "hybrid") and not self.running
         self.rclone_controls.setEnabled(rclone_selected)
         self.rclone_controls.setToolTip(
@@ -2613,6 +2638,14 @@ class MainWindow(QMainWindow):
     def start_rclone_install(self) -> None:
         if self.rclone_install_thread is not None and self.rclone_install_thread.isRunning():
             return
+        if any(isinstance(worker, RcloneDownloader) for worker in self.workers.values()):
+            QMessageBox.warning(
+                self,
+                APP_NAME,
+                "Rclone сейчас используется. Остановите загрузку или выгрузку, "
+                "дождитесь завершения процесса и повторите обновление.",
+            )
+            return
         self.download_rclone_button.setEnabled(False)
         self.download_rclone_button.setText("Скачивание…")
         self.rclone_install_progress.setValue(0)
@@ -2746,6 +2779,9 @@ class MainWindow(QMainWindow):
         QApplication.instance().quit()
 
     def max_concurrent_downloads(self) -> int:
+        engine = str(self.copy_engine_combo.currentData() or "robocopy")
+        if engine in ("rclone", "hybrid"):
+            return 1
         mode = self.download_mode_combo.currentData()
         if mode == "sequential":
             return 1

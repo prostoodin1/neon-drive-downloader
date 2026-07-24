@@ -26,6 +26,20 @@ def rclone_archive(payload: bytes = b"MZ-neon-rclone") -> bytes:
 
 
 class RcloneManagerTests(unittest.TestCase):
+    def test_locked_executable_has_clear_error(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temporary = Path(temp_dir) / "rclone.download"
+            target = Path(temp_dir) / "rclone.exe"
+            temporary.write_bytes(b"MZ-new")
+            target.write_bytes(b"MZ-running")
+
+            with (
+                patch.object(Path, "replace", side_effect=PermissionError(13, "Access denied")),
+                patch.object(rclone_manager.time, "sleep"),
+                self.assertRaisesRegex(RuntimeError, "Rclone сейчас используется"),
+            ):
+                rclone_manager._replace_executable(temporary, target)
+
     def test_download_verifies_checksum_and_installs_only_executable(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             archive = rclone_archive()
