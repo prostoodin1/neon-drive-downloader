@@ -1,5 +1,17 @@
 # Changelog
 
+## 5.4.0-beta.4
+
+- Converted the upload screen into an optional beta-only add-on controlled from
+  the Updates tab with install, remove, and GitHub actions.
+- Hidden both the upload tab and add-on controls from stable builds.
+- Added compact, comfortable, and minimalist design modes with denser modern
+  buttons, tabs, cards, inputs, and spacing throughout the application.
+- Added manifest validation and isolated add-on storage under the application
+  data directory without touching files already uploaded to Google Drive.
+- Kept the most recently downloaded application installer in a single cache and
+  displayed its version on the Updates tab after restarting the app.
+
 ## 5.4.0-beta.3
 
 - Added a dedicated `ВЫГРУЗКА` tab for copying local files and folders to a

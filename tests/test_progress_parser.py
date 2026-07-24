@@ -12,6 +12,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QSettings
 from PySide6.QtWidgets import QApplication, QLabel
 
+from neon_drive.addons import UPLOAD_ADDON_FILE
 from neon_drive.app import (
     MAX_CONCURRENT_DOWNLOADS,
     MAX_TURBO_THREADS,
@@ -75,16 +76,31 @@ class StopAfterCurrentFileTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.temp_settings = tempfile.TemporaryDirectory()
+        cls.previous_addon_dir = os.environ.get("NEON_DRIVE_ADDON_DIR")
+        cls.addon_dir = Path(cls.temp_settings.name) / "addons"
+        cls.addon_dir.mkdir()
+        manifest = Path(__file__).parents[1] / "addons" / UPLOAD_ADDON_FILE
+        (cls.addon_dir / UPLOAD_ADDON_FILE).write_text(
+            manifest.read_text(encoding="utf-8"), encoding="utf-8"
+        )
+        os.environ["NEON_DRIVE_ADDON_DIR"] = str(cls.addon_dir)
         QSettings.setDefaultFormat(QSettings.Format.IniFormat)
         QSettings.setPath(
             QSettings.Format.IniFormat,
             QSettings.Scope.UserScope,
             str(Path(cls.temp_settings.name)),
         )
+        isolated_settings = QSettings("NeonTools", "Neon Drive Downloader")
+        isolated_settings.clear()
+        isolated_settings.sync()
         cls.app = QApplication.instance() or QApplication([])
 
     @classmethod
     def tearDownClass(cls) -> None:
+        if cls.previous_addon_dir is None:
+            os.environ.pop("NEON_DRIVE_ADDON_DIR", None)
+        else:
+            os.environ["NEON_DRIVE_ADDON_DIR"] = cls.previous_addon_dir
         cls.temp_settings.cleanup()
 
     def test_selected_current_file_stops_remaining_parallel_worker(self) -> None:
@@ -248,6 +264,35 @@ class StopAfterCurrentFileTests(unittest.TestCase):
         window.force_exit = True
         window.close()
 
+    def test_design_modes_are_compact_by_default_and_switch_live(self) -> None:
+        window = MainWindow()
+        window.notifications_check.setChecked(False)
+
+        self.assertEqual(window.design_mode_combo.currentData(), "compact")
+        self.assertEqual(window.start_button.minimumHeight(), 42)
+        modes = {
+            window.design_mode_combo.itemData(index)
+            for index in range(window.design_mode_combo.count())
+        }
+        self.assertEqual(modes, {"compact", "comfortable", "minimal"})
+
+        window.design_mode_combo.setCurrentIndex(
+            window.design_mode_combo.findData("comfortable")
+        )
+        self.assertEqual(window.start_button.minimumHeight(), 52)
+        window.force_exit = True
+        window.close()
+
+    def test_stable_build_hides_upload_addon_controls_and_tab(self) -> None:
+        with patch("neon_drive.app.is_beta_build", return_value=False):
+            window = MainWindow()
+        window.notifications_check.setChecked(False)
+
+        self.assertEqual(window.tabs.indexOf(window.upload_page), -1)
+        self.assertFalse(hasattr(window, "addon_install_button"))
+        window.force_exit = True
+        window.close()
+
     def test_turbo_profile_uses_segmented_worker_for_one_file(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -315,6 +360,7 @@ class StopAfterCurrentFileTests(unittest.TestCase):
             self.assertEqual(window.tabs.tabText(window.upload_tab_index), "ВЫГРУЗКА")
             self.assertEqual(window.active_transfer, "upload")
             self.assertEqual(window.start_button.text(), "НАЧАТЬ ВЫГРУЗКУ")
+            self.assertIn("1.0.0-beta.1", window.addon_status_badge.text())
 
             window.upload_sources.setPlainText(str(source))
             window.upload_destination.setText(str(drive_destination))

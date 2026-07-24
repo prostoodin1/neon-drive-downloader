@@ -69,12 +69,21 @@ from PySide6.QtWidgets import (
 )
 
 from . import __version__
+from .addons import (
+    install_upload_addon,
+    is_beta_build,
+    read_upload_addon,
+    remove_upload_addon,
+    upload_addon_github_url,
+    upload_addon_installed,
+)
 from .updater import (
     REPOSITORY,
     SETUP_ASSET_NAME,
     ReleaseHistoryThread,
     UpdateCheckThread,
     UpdateDownloadThread,
+    last_downloaded_release,
     launch_replacement,
 )
 from .turbo_copy import TurboCopyStopped, parallel_copy_file
@@ -640,9 +649,30 @@ class TransferPanel:
     file_rows: dict[str, FileRow] = field(default_factory=dict)
 
 
+class AddonInstallThread(QThread):
+    succeeded = Signal(str)
+    failed = Signal(str)
+
+    def run(self) -> None:
+        try:
+            path = install_upload_addon(__version__)
+        except Exception as exc:
+            self.failed.emit(str(exc))
+            return
+        self.succeeded.emit(str(path))
+
+
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
+        settings_override = os.environ.get("NEON_DRIVE_SETTINGS_DIR")
+        if settings_override:
+            QSettings.setDefaultFormat(QSettings.Format.IniFormat)
+            QSettings.setPath(
+                QSettings.Format.IniFormat,
+                QSettings.Scope.UserScope,
+                settings_override,
+            )
         self.settings = QSettings("NeonTools", APP_NAME)
         self.queue: deque[str] = deque()
         self.workers: dict[str, Downloader | TurboFileDownloader] = {}
@@ -673,6 +703,9 @@ class MainWindow(QMainWindow):
         self.update_download_thread: UpdateDownloadThread | None = None
         self.release_history_thread: ReleaseHistoryThread | None = None
         self.release_history: list[dict] = []
+        self.addon_install_thread: AddonInstallThread | None = None
+        self.beta_build = is_beta_build(__version__)
+        self.upload_addon_enabled = self.beta_build and upload_addon_installed(__version__)
         self.force_exit = False
         self.close_when_idle = False
         self.settings_dirty = False
@@ -706,8 +739,9 @@ class MainWindow(QMainWindow):
         root = QWidget(objectName="root")
         self.setCentralWidget(root)
         outer = QVBoxLayout(root)
-        outer.setContentsMargins(28, 22, 28, 20)
-        outer.setSpacing(14)
+        self.outer_layout = outer
+        outer.setContentsMargins(20, 16, 20, 14)
+        outer.setSpacing(10)
 
         title_row = QHBoxLayout()
         title = QLabel("NEON")
@@ -726,12 +760,12 @@ class MainWindow(QMainWindow):
         outer.addWidget(subtitle)
 
         self.tabs = QTabWidget(objectName="navTabs")
-        self.download_tab_index = self.tabs.addTab(
-            self.build_transfer_tab("download"), "ЗАГРУЗКА"
-        )
-        self.upload_tab_index = self.tabs.addTab(
-            self.build_transfer_tab("upload"), "ВЫГРУЗКА"
-        )
+        self.download_page = self.build_transfer_tab("download")
+        self.upload_page = self.build_transfer_tab("upload")
+        self.download_tab_index = self.tabs.addTab(self.download_page, "ЗАГРУЗКА")
+        self.upload_tab_index = -1
+        if self.upload_addon_enabled:
+            self.upload_tab_index = self.tabs.addTab(self.upload_page, "ВЫГРУЗКА")
         self.tabs.addTab(self.build_settings_tab(), "НАСТРОЙКИ")
         self.tabs.addTab(self.build_interface_tab(), "ИНТЕРФЕЙС")
         self.tabs.addTab(self.build_updates_tab(), "ОБНОВЛЕНИЯ")
@@ -743,7 +777,7 @@ class MainWindow(QMainWindow):
 
         self.start_button = QPushButton("НАЧАТЬ СКАЧИВАНИЕ")
         self.start_button.setObjectName("primary")
-        self.start_button.setMinimumHeight(56)
+        self.start_button.setMinimumHeight(44)
         self.start_button.clicked.connect(self.start_current_transfer)
         outer.addWidget(self.start_button)
 
@@ -761,7 +795,7 @@ class MainWindow(QMainWindow):
     def build_overall_status(self) -> QFrame:
         status_card = self.card()
         status = QHBoxLayout(status_card)
-        status.setContentsMargins(22, 12, 22, 12)
+        status.setContentsMargins(16, 9, 16, 9)
         self.ring = Ring()
         status.addWidget(self.ring)
         progress_box = QVBoxLayout()
@@ -788,14 +822,14 @@ class MainWindow(QMainWindow):
         upload = direction == "upload"
         page = QWidget()
         page_layout = QVBoxLayout(page)
-        page_layout.setContentsMargins(0, 12, 0, 4)
-        page_layout.setSpacing(14)
+        page_layout.setContentsMargins(0, 8, 0, 2)
+        page_layout.setSpacing(10)
         content = QHBoxLayout()
-        content.setSpacing(18)
+        content.setSpacing(12)
         form_card = self.card()
         form = QVBoxLayout(form_card)
-        form.setContentsMargins(22, 20, 22, 22)
-        form.setSpacing(12)
+        form.setContentsMargins(16, 13, 16, 15)
+        form.setSpacing(8)
         form.addWidget(
             self.label("ЛОКАЛЬНЫЕ ФАЙЛЫ И ПАПКИ" if upload else "ФАЙЛЫ И ПАПКИ С GOOGLE DRIVE")
         )
@@ -842,7 +876,7 @@ class MainWindow(QMainWindow):
 
         terminal_card = self.card()
         terminal_layout = QVBoxLayout(terminal_card)
-        terminal_layout.setContentsMargins(20, 16, 20, 18)
+        terminal_layout.setContentsMargins(16, 12, 16, 13)
         terminal_layout.addWidget(self.label("LIVE TERMINAL"))
         terminal = QPlainTextEdit(objectName="terminal")
         terminal.setReadOnly(True)
@@ -868,7 +902,7 @@ class MainWindow(QMainWindow):
 
         files_card = self.card()
         files_layout = QVBoxLayout(files_card)
-        files_layout.setContentsMargins(18, 14, 18, 14)
+        files_layout.setContentsMargins(14, 10, 14, 10)
         files_header = QHBoxLayout()
         files_header.addWidget(self.label("ФАЙЛЫ В РАБОТЕ · ВИД МЕНЯЕТСЯ В НАСТРОЙКАХ"))
         files_header.addStretch()
@@ -882,7 +916,7 @@ class MainWindow(QMainWindow):
         file_list_widget = QWidget()
         file_list_layout = QGridLayout(file_list_widget)
         file_list_layout.setContentsMargins(0, 0, 0, 0)
-        file_list_layout.setSpacing(10)
+        file_list_layout.setSpacing(7)
         scroll.setWidget(file_list_widget)
         files_layout.addWidget(scroll, 1)
         page_layout.addWidget(files_card, 2)
@@ -928,7 +962,7 @@ class MainWindow(QMainWindow):
     def create_restart_banner(self) -> QFrame:
         banner = QFrame(objectName="restartBanner")
         restart_layout = QHBoxLayout(banner)
-        restart_layout.setContentsMargins(18, 10, 12, 10)
+        restart_layout.setContentsMargins(14, 7, 9, 7)
         restart_layout.addWidget(
             QLabel("↻  Настройки изменены — нужен перезапуск приложения"), 1
         )
@@ -947,8 +981,8 @@ class MainWindow(QMainWindow):
         card = self.card()
         card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         box = QVBoxLayout(card)
-        box.setContentsMargins(20, 18, 20, 18)
-        box.setSpacing(9)
+        box.setContentsMargins(16, 13, 16, 13)
+        box.setSpacing(7)
         heading = QLabel(title)
         heading.setObjectName("sectionTitle")
         box.addWidget(heading)
@@ -1195,6 +1229,21 @@ class MainWindow(QMainWindow):
         )
         grid.addWidget(theme_card, 0, 0)
 
+        design_card, design_box = self.settings_section("РЕЖИМ ДИЗАЙНА")
+        design_box.addWidget(QLabel("Плотность и форма интерфейса"))
+        self.design_mode_combo = QComboBox()
+        self.design_mode_combo.addItem("Компактный · больше информации", "compact")
+        self.design_mode_combo.addItem("Комфортный · крупнее элементы", "comfortable")
+        self.design_mode_combo.addItem("Минималистичный · строгие формы", "minimal")
+        design_box.addWidget(self.design_mode_combo)
+        self.design_mode_note = QLabel(
+            "Компактный режим уменьшает кнопки, вкладки и отступы, сохраняя удобные зоны нажатия."
+        )
+        self.design_mode_note.setObjectName("settingDescription")
+        self.design_mode_note.setWordWrap(True)
+        design_box.addWidget(self.design_mode_note)
+        grid.addWidget(design_card, 0, 1)
+
         motion_card, motion_box = self.settings_section("ПЛАВНОСТЬ И АНИМАЦИИ")
         self.animations_check = self.add_setting_toggle(
             motion_box, "Плавные вкладки, карточки, статусы и полосы прогресса"
@@ -1206,7 +1255,7 @@ class MainWindow(QMainWindow):
         motion_note.setObjectName("settingDescription")
         motion_note.setWordWrap(True)
         motion_box.addWidget(motion_note)
-        grid.addWidget(motion_card, 0, 1)
+        grid.addWidget(motion_card, 1, 0, 1, 2)
 
         grid.setColumnStretch(0, 1)
         grid.setColumnStretch(1, 1)
@@ -1231,6 +1280,11 @@ class MainWindow(QMainWindow):
         self.update_status.setObjectName("settingDescription")
         self.update_status.setWordWrap(True)
         update_box.addWidget(self.update_status)
+        self.last_download_status = QLabel()
+        self.last_download_status.setObjectName("cacheStatus")
+        self.last_download_status.setWordWrap(True)
+        update_box.addWidget(self.last_download_status)
+        self.refresh_last_download_ui()
         update_row = QHBoxLayout()
         self.check_update_button = QPushButton("ПРОВЕРИТЬ ОБНОВЛЕНИЯ")
         self.check_update_button.clicked.connect(lambda: self.check_updates(silent=False))
@@ -1248,6 +1302,43 @@ class MainWindow(QMainWindow):
         update_row.addStretch()
         update_box.addLayout(update_row)
         layout.addWidget(update_card)
+
+        if self.beta_build:
+            addon_card, addon_box = self.settings_section("BETA-ДОПОЛНЕНИЕ · ВЫГРУЗКА")
+            self.addon_card = addon_card
+            addon_header = QHBoxLayout()
+            self.addon_status_badge = QLabel()
+            self.addon_status_badge.setObjectName("addonBadge")
+            addon_header.addWidget(self.addon_status_badge)
+            addon_header.addStretch()
+            beta_badge = QLabel("BETA ONLY")
+            beta_badge.setObjectName("betaBadge")
+            addon_header.addWidget(beta_badge)
+            addon_box.addLayout(addon_header)
+            addon_note = QLabel(
+                "Добавляет отдельную вкладку для выгрузки локальных файлов и папок в "
+                "Google Drive, подключённый к Проводнику Windows."
+            )
+            addon_note.setObjectName("settingDescription")
+            addon_note.setWordWrap(True)
+            addon_box.addWidget(addon_note)
+            addon_actions = QHBoxLayout()
+            addon_actions.setSpacing(7)
+            self.addon_install_button = QPushButton("СКАЧАТЬ И УСТАНОВИТЬ")
+            self.addon_install_button.setObjectName("primarySmall")
+            self.addon_install_button.clicked.connect(self.start_upload_addon_install)
+            self.addon_remove_button = QPushButton("УДАЛИТЬ")
+            self.addon_remove_button.setObjectName("danger")
+            self.addon_remove_button.clicked.connect(self.remove_upload_addon_clicked)
+            self.addon_github_button = QPushButton("ОТКРЫТЬ НА GITHUB")
+            self.addon_github_button.clicked.connect(self.open_upload_addon_github)
+            addon_actions.addWidget(self.addon_install_button)
+            addon_actions.addWidget(self.addon_remove_button)
+            addon_actions.addWidget(self.addon_github_button)
+            addon_actions.addStretch()
+            addon_box.addLayout(addon_actions)
+            layout.addWidget(addon_card)
+            self.refresh_upload_addon_ui()
 
         history_card, history_box = self.settings_section("ДОСТУПНЫЕ ВЕРСИИ")
         self.manual_update_card = history_card
@@ -1274,12 +1365,159 @@ class MainWindow(QMainWindow):
         layout.addStretch()
         return page
 
+    def refresh_last_download_ui(self) -> None:
+        cached = last_downloaded_release()
+        if cached:
+            downloaded_date = str(cached.get("downloaded_at") or "")[:10]
+            date_suffix = f" · {downloaded_date}" if downloaded_date else ""
+            self.last_download_status.setText(
+                f"Последняя скачанная версия: {cached.get('version') or '—'}{date_suffix}"
+            )
+            self.last_download_status.setToolTip(str(cached.get("path") or ""))
+            self.last_download_status.setProperty("cached", True)
+        else:
+            self.last_download_status.setText("Последняя скачанная версия: ещё не скачивалась")
+            self.last_download_status.setToolTip("")
+            self.last_download_status.setProperty("cached", False)
+        self.last_download_status.style().unpolish(self.last_download_status)
+        self.last_download_status.style().polish(self.last_download_status)
+
+    def refresh_upload_addon_ui(self) -> None:
+        if not self.beta_build or not hasattr(self, "addon_status_badge"):
+            return
+        addon = read_upload_addon(__version__) if self.upload_addon_enabled else None
+        installed = addon is not None
+        addon_version = str(addon.get("version") or "") if addon else ""
+        self.addon_status_badge.setText(
+            f"●  УСТАНОВЛЕНО · {addon_version} · ВКЛАДКА ДОСТУПНА"
+            if installed
+            else "○  НЕ УСТАНОВЛЕНО"
+        )
+        self.addon_status_badge.setProperty("installed", installed)
+        self.addon_status_badge.style().unpolish(self.addon_status_badge)
+        self.addon_status_badge.style().polish(self.addon_status_badge)
+        busy = bool(self.addon_install_thread and self.addon_install_thread.isRunning())
+        self.addon_install_button.setText(
+            "ПЕРЕУСТАНОВИТЬ" if installed else "СКАЧАТЬ И УСТАНОВИТЬ"
+        )
+        self.addon_install_button.setEnabled(not busy)
+        self.addon_remove_button.setEnabled(installed and not busy)
+        self.addon_github_button.setEnabled(not busy)
+
+    def set_upload_addon_enabled(self, enabled: bool) -> None:
+        enabled = bool(enabled and self.beta_build)
+        current_index = self.tabs.indexOf(self.upload_page)
+        if enabled and current_index < 0:
+            current_index = self.tabs.insertTab(1, self.upload_page, "ВЫГРУЗКА")
+        elif not enabled and current_index >= 0:
+            if self.tabs.currentWidget() is self.upload_page:
+                self.tabs.setCurrentWidget(self.download_page)
+            self.tabs.removeTab(current_index)
+            current_index = -1
+        self.upload_addon_enabled = enabled
+        self.download_tab_index = self.tabs.indexOf(self.download_page)
+        self.upload_tab_index = current_index
+        if not enabled:
+            self.active_transfer = "download"
+            self.file_rows = self.transfer_panels["download"].file_rows
+            self.update_start_button()
+        self.refresh_upload_addon_ui()
+
+    def start_upload_addon_install(self) -> None:
+        if not self.beta_build:
+            return
+        if self.addon_install_thread and self.addon_install_thread.isRunning():
+            return
+        self.addon_status_badge.setText("◌  СКАЧИВАНИЕ ПАКЕТА С GITHUB…")
+        self.addon_install_button.setEnabled(False)
+        self.addon_remove_button.setEnabled(False)
+        self.addon_github_button.setEnabled(False)
+        thread = AddonInstallThread(self)
+        self.addon_install_thread = thread
+        thread.succeeded.connect(self.upload_addon_install_succeeded)
+        thread.failed.connect(self.upload_addon_install_failed)
+        thread.finished.connect(self.upload_addon_install_finished)
+        thread.start()
+
+    def upload_addon_install_succeeded(self, path: str) -> None:
+        self.set_upload_addon_enabled(True)
+        self.append_log(f"Дополнение «Выгрузка» установлено: {path}\n")
+        QMessageBox.information(
+            self,
+            APP_NAME,
+            "Дополнение «Выгрузка» установлено. Вкладка уже доступна без перезапуска.",
+        )
+
+    def upload_addon_install_failed(self, message: str) -> None:
+        self.addon_status_badge.setText("!  ОШИБКА УСТАНОВКИ")
+        self.append_log(f"Дополнение «Выгрузка»: {message}\n")
+        QMessageBox.critical(
+            self,
+            APP_NAME,
+            f"Не удалось установить дополнение «Выгрузка»:\n{message}",
+        )
+
+    def upload_addon_install_finished(self) -> None:
+        self.addon_install_thread = None
+        self.refresh_upload_addon_ui()
+
+    def remove_upload_addon_clicked(self) -> None:
+        if self.running and self.active_transfer == "upload":
+            QMessageBox.warning(
+                self,
+                APP_NAME,
+                "Сначала завершите или остановите текущую выгрузку.",
+            )
+            return
+        answer = QMessageBox.question(
+            self,
+            APP_NAME,
+            "Удалить дополнение «Выгрузка»? Файлы в Google Drive останутся на месте.",
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        remove_upload_addon()
+        self.set_upload_addon_enabled(False)
+        self.append_log("Дополнение «Выгрузка» удалено.\n")
+
+    def open_upload_addon_github(self) -> None:
+        QDesktopServices.openUrl(QUrl(upload_addon_github_url(__version__)))
+
     def sync_file_display_radios(self, index: int) -> None:
         if 0 <= index < len(self.file_display_radios):
             self.file_display_radios[index].setChecked(True)
 
     def apply_theme(self) -> None:
         theme = self.theme_combo.currentData() if hasattr(self, "theme_combo") else "oled"
+        design = (
+            self.design_mode_combo.currentData()
+            if hasattr(self, "design_mode_combo")
+            else "compact"
+        )
+        design_modes = {
+            "compact": {
+                "outer": (18, 14, 18, 12), "spacing": 9, "start_height": 42,
+                "button_v": 6, "button_h": 10, "input_v": 6, "input_h": 9,
+                "tab_v": 7, "tab_h": 13, "tab_gap": 4,
+                "radius": 7, "card_radius": 10, "title": 25,
+                "metric": 19, "section": 13,
+            },
+            "comfortable": {
+                "outer": (26, 20, 26, 18), "spacing": 13, "start_height": 52,
+                "button_v": 9, "button_h": 14, "input_v": 9, "input_h": 11,
+                "tab_v": 10, "tab_h": 20, "tab_gap": 5,
+                "radius": 10, "card_radius": 15, "title": 29,
+                "metric": 23, "section": 15,
+            },
+            "minimal": {
+                "outer": (16, 12, 16, 11), "spacing": 8, "start_height": 40,
+                "button_v": 6, "button_h": 9, "input_v": 6, "input_h": 8,
+                "tab_v": 7, "tab_h": 12, "tab_gap": 2,
+                "radius": 4, "card_radius": 5, "title": 24,
+                "metric": 18, "section": 13,
+            },
+        }
+        metrics = design_modes.get(str(design), design_modes["compact"])
         themes = {
             "oled": {
                 "background": "#000000", "card": "#080b0d", "input": "#020405",
@@ -1301,6 +1539,22 @@ class MainWindow(QMainWindow):
             },
         }
         colors = themes.get(str(theme), themes["oled"])
+        root_background = (
+            f"qlineargradient(x1:0, y1:0, x2:1, y2:1, "
+            f"stop:0 {colors['background']}, stop:1 {colors['input']})"
+        )
+        if hasattr(self, "outer_layout"):
+            self.outer_layout.setContentsMargins(*metrics["outer"])
+            self.outer_layout.setSpacing(metrics["spacing"])
+        if hasattr(self, "start_button"):
+            self.start_button.setMinimumHeight(metrics["start_height"])
+        if hasattr(self, "design_mode_note"):
+            notes = {
+                "compact": "Компактный режим уменьшает кнопки, вкладки и отступы, сохраняя удобные зоны нажатия.",
+                "comfortable": "Комфортный режим увеличивает элементы и расстояния для большого экрана или сенсорного ввода.",
+                "minimal": "Минималистичный режим использует плотную сетку, строгие формы и меньше визуального шума.",
+            }
+            self.design_mode_note.setText(notes.get(str(design), notes["compact"]))
         selected_accent = self.accent_combo.currentData() if hasattr(self, "accent_combo") else "#00e8f5"
         accent = getattr(self, "accent_color", None) or str(selected_accent or "#00e8f5")
         accent_color = QColor(accent)
@@ -1320,28 +1574,28 @@ class MainWindow(QMainWindow):
             f"background: {colors['button']}; color: {colors['text']}; border-color: {colors['border']};"
         )
         stylesheet = f"""
-            * {{ font-family: 'Segoe UI'; color: {colors['text']}; }}
-            #root {{ background: {colors['background']}; }}
+            * {{ font-family: 'Segoe UI Variable', 'Segoe UI'; color: {colors['text']}; }}
+            #root {{ background: {root_background}; }}
             QDialog, QMessageBox {{ background-color: {colors['background']}; }}
             QMessageBox QLabel {{ color: {colors['text']}; font-size: 13px; min-width: 270px; }}
             QMessageBox QPushButton {{ min-width: 78px; }}
             QMenu {{ background: {colors['card']}; color: {colors['text']}; border: 1px solid {colors['border']}; }}
             QMenu::item:selected {{ background: {accent}; color: {accent_text}; }}
             QToolTip {{ background: {colors['card']}; color: {colors['text']}; border: 1px solid {accent}; padding: 5px; }}
-            #title, #brandAccent {{ font-size: 28px; font-weight: 800; letter-spacing: 2px; }}
+            #title, #brandAccent {{ font-size: {metrics['title']}px; font-weight: 800; letter-spacing: 2px; }}
             #brandAccent {{ color: {accent}; }}
             #versionBadge {{ color: {colors['muted']}; font-size: 15px; font-weight: 700; padding-top: 7px; }}
             #subtitle, #caption {{ color: {colors['muted']}; font-size: 10px; font-weight: 700; letter-spacing: 1px; }}
-            #state {{ color: {accent}; background: {colors['card']}; border: 1px solid {accent}; border-radius: 13px; padding: 6px 12px; }}
+            #state {{ color: {accent}; background: {colors['card']}; border: 1px solid {accent}; border-radius: {metrics['radius'] + 4}px; padding: {metrics['button_v']}px {metrics['button_h'] + 1}px; }}
             #footerInfo {{ color: {colors['muted']}; }}
-            #card, #fileRow {{ background: {colors['card']}; border: 1px solid {colors['border']}; border-radius: 14px; }}
+            #card, #fileRow {{ background: {colors['card']}; border: 1px solid {colors['border']}; border-radius: {metrics['card_radius']}px; }}
             #fileRow:hover {{ border-color: {accent}; }}
-            #restartBanner {{ background: {colors['card']}; border: 1px solid {accent}; border-radius: 11px; }}
-            QPlainTextEdit, QLineEdit, QComboBox {{ background: {colors['input']}; color: {colors['text']}; border: 1px solid {colors['border']}; border-radius: 8px; padding: 8px 10px; selection-background-color: {accent}; }}
+            #restartBanner {{ background: {colors['card']}; border: 1px solid {accent}; border-radius: {metrics['radius']}px; }}
+            QPlainTextEdit, QLineEdit, QComboBox {{ background: {colors['input']}; color: {colors['text']}; border: 1px solid {colors['border']}; border-radius: {metrics['radius']}px; padding: {metrics['input_v']}px {metrics['input_h']}px; selection-background-color: {accent}; }}
             QComboBox QAbstractItemView {{ background: {colors['card']}; color: {colors['text']}; border: 1px solid {colors['border']}; selection-background-color: {accent}; selection-color: {accent_text}; }}
             QPlainTextEdit:focus, QLineEdit:focus, QComboBox:focus {{ border-color: {accent}; }}
             #terminal {{ color: {terminal_text}; font-family: 'Cascadia Mono', Consolas; font-size: 11px; background: {colors['terminal']}; }}
-            QPushButton {{ {general_button} border-width: 1px; border-style: solid; border-radius: 8px; padding: 9px 13px; font-weight: 700; }}
+            QPushButton {{ {general_button} border-width: 1px; border-style: solid; border-radius: {metrics['radius']}px; padding: {metrics['button_v']}px {metrics['button_h']}px; font-weight: 650; }}
             QPushButton:hover {{ border-color: {accent_hover}; color: {accent if not all_buttons else accent_text}; }}
             QPushButton:pressed {{ background: {accent_color.darker(135).name()}; color: {accent_text}; }}
             QPushButton:disabled {{ color: {colors['disabled']}; border-color: {colors['border']}; background: {colors['track']}; }}
@@ -1353,24 +1607,29 @@ class MainWindow(QMainWindow):
             #fileStatus {{ color: {green}; font-weight: 800; }}
             #fileInfo {{ color: {colors['muted']}; font-family: 'Cascadia Mono', Consolas; font-size: 11px; }}
             #danger:hover {{ border-color: #ff426d; color: #ff426d; }}
-            #primary, #primarySmall {{ background: {accent}; color: {accent_text}; border: 1px solid {accent_hover}; border-radius: 10px; letter-spacing: 1px; }}
-            #primary {{ font-size: 14px; }}
+            #primary, #primarySmall {{ background: {accent}; color: {accent_text}; border: 1px solid {accent_hover}; border-radius: {metrics['radius'] + 2}px; letter-spacing: 0.7px; }}
+            #primary {{ font-size: {metrics['section']}px; }}
             #primary:hover, #primarySmall:hover {{ background: {accent_hover}; color: {accent_text}; }}
             #primary:disabled {{ background: {colors['track']}; color: {colors['disabled']}; border-color: {colors['border']}; }}
             QProgressBar {{ background: {colors['track']}; border: 0; border-radius: 4px; height: 8px; }}
             QProgressBar::chunk {{ background: {accent}; border-radius: 4px; }}
             #progressText {{ font-size: 12px; font-weight: 700; }}
-            #eta {{ color: {accent}; font-size: 22px; font-weight: 700; }}
-            #speed {{ color: {green}; font-size: 22px; font-weight: 700; min-width: 145px; }}
+            #eta {{ color: {accent}; font-size: {metrics['metric']}px; font-weight: 700; }}
+            #speed {{ color: {green}; font-size: {metrics['metric']}px; font-weight: 700; min-width: 130px; }}
             #navTabs::pane {{ border: 0; }}
-            QTabBar::tab {{ background: {colors['card']}; color: {colors['muted']}; border: 1px solid {colors['border']}; padding: 10px 22px; margin-right: 5px; border-radius: 8px; font-weight: 700; }}
+            QTabBar::tab {{ background: {colors['card']}; color: {colors['muted']}; border: 1px solid {colors['border']}; padding: {metrics['tab_v']}px {metrics['tab_h']}px; margin-right: {metrics['tab_gap']}px; border-radius: {metrics['radius']}px; font-weight: 650; }}
             QTabBar::tab:selected {{ color: {accent}; background: {colors['input']}; border-color: {accent}; }}
             QTabBar::tab:hover {{ color: {accent_hover}; border-color: {accent}; }}
-            #settingCheck, #settingToggle {{ font-size: 13px; spacing: 10px; padding: 5px 0; }}
-            #sectionTitle {{ font-size: 15px; font-weight: 750; padding-bottom: 7px; }}
-            #settingDescription {{ color: {colors['muted']}; padding: 4px 0; }}
+            #settingCheck, #settingToggle {{ font-size: 12px; spacing: 8px; padding: 3px 0; }}
+            #sectionTitle {{ font-size: {metrics['section']}px; font-weight: 750; padding-bottom: 5px; }}
+            #settingDescription {{ color: {colors['muted']}; padding: 3px 0; }}
             #separator {{ color: {colors['border']}; margin: 10px 0; }}
             #updateButton {{ color: {green}; border-color: {green}; }}
+            #betaBadge {{ color: {accent}; background: {colors['input']}; border: 1px solid {accent}; border-radius: {metrics['radius']}px; padding: 3px 8px; font-size: 10px; font-weight: 800; letter-spacing: 1px; }}
+            #addonBadge {{ color: {colors['muted']}; font-size: 12px; font-weight: 750; }}
+            #addonBadge[installed="true"] {{ color: {green}; }}
+            #cacheStatus {{ color: {colors['muted']}; background: {colors['input']}; border: 1px solid {colors['border']}; border-radius: {metrics['radius']}px; padding: 6px 9px; font-size: 11px; }}
+            #cacheStatus[cached="true"] {{ color: {green}; border-color: {green}; }}
             QCheckBox::indicator {{ width: 19px; height: 19px; border: 1px solid {colors['border']}; border-radius: 5px; background: {colors['input']}; }}
             QCheckBox::indicator:checked {{ background: {accent}; border-color: {accent_hover}; }}
             QCheckBox::indicator:disabled {{ background: {colors['track']}; border-color: {colors['border']}; }}
@@ -1424,6 +1683,7 @@ class MainWindow(QMainWindow):
             self.settings.value("show_destination_links", True, type=bool)
         )
         select(self.theme_combo, self.settings.value("theme", "oled"))
+        select(self.design_mode_combo, self.settings.value("design_mode", "compact"))
         stored_accent = str(self.settings.value("accent_color", "#00e8f5"))
         accent_index = self.accent_combo.findData(stored_accent)
         if accent_index < 0:
@@ -1470,6 +1730,7 @@ class MainWindow(QMainWindow):
             self.show_source_links_check.stateChanged,
             self.show_destination_links_check.stateChanged,
             self.theme_combo.currentIndexChanged,
+            self.design_mode_combo.currentIndexChanged,
             self.accent_combo.currentIndexChanged,
             self.accent_all_buttons_check.stateChanged,
             self.animations_check.stateChanged,
@@ -1507,6 +1768,7 @@ class MainWindow(QMainWindow):
             "show_destination_links", self.show_destination_links_check.isChecked()
         )
         self.settings.setValue("theme", self.theme_combo.currentData())
+        self.settings.setValue("design_mode", self.design_mode_combo.currentData())
         self.settings.setValue("accent_color", self.accent_color)
         self.settings.setValue("accent_all_buttons", self.accent_all_buttons_check.isChecked())
         self.settings.setValue("animations", self.animations_check.isChecked())
@@ -1529,10 +1791,6 @@ class MainWindow(QMainWindow):
             self.accent_color = str(self.accent_combo.currentData())
         self.persist_settings()
         self.settings_dirty = True
-        for banner in self.restart_banners:
-            if not banner.isVisible():
-                banner.setVisible(True)
-                self.animate_appearance(banner, duration=220)
         self.update_settings_visibility()
         self.apply_theme()
         self.refresh_file_rows("download")
@@ -1657,9 +1915,10 @@ class MainWindow(QMainWindow):
     def transfer_tab_changed(self, index: int) -> None:
         if self.running:
             return
-        if index == self.download_tab_index:
+        page = self.tabs.widget(index)
+        if page is self.download_page:
             self.active_transfer = "download"
-        elif index == self.upload_tab_index:
+        elif page is self.upload_page and self.upload_addon_enabled:
             self.active_transfer = "upload"
         else:
             return
@@ -1703,11 +1962,17 @@ class MainWindow(QMainWindow):
                 self._animations.remove(animation)
 
         def cleanup() -> None:
-            widget.setGraphicsEffect(None)
+            try:
+                widget.setGraphicsEffect(None)
+            except RuntimeError:
+                pass
             discard()
 
         def widget_destroyed() -> None:
-            animation.stop()
+            try:
+                animation.stop()
+            except RuntimeError:
+                pass
             discard()
 
         animation.finished.connect(cleanup)
@@ -1891,6 +2156,13 @@ class MainWindow(QMainWindow):
 
     def start_transfers(self, direction: str) -> None:
         if self.running or self.workers:
+            return
+        if direction == "upload" and not self.upload_addon_enabled:
+            QMessageBox.warning(
+                self,
+                APP_NAME,
+                "Сначала установите BETA-дополнение «Выгрузка» во вкладке обновлений.",
+            )
             return
         self.active_transfer = direction
         panel = self.current_transfer_panel()
@@ -2586,6 +2858,7 @@ class MainWindow(QMainWindow):
         thread.start()
 
     def update_download_succeeded(self, downloaded: str) -> None:
+        self.refresh_last_download_ui()
         try:
             launch_replacement(Path(downloaded), Path(sys.executable))
         except Exception as exc:
