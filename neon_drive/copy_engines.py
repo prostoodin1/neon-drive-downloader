@@ -19,10 +19,12 @@ class RcloneOptions:
     transfers: int = 4
     checkers: int = 8
     buffer_size_mib: int = 16
+    multi_thread_write_buffer_size_mib: int = 1
     retries: int = 3
     low_level_retries: int = 10
     checksum: bool = False
     local_no_sparse: bool = True
+    local_no_preallocate: bool = True
 
 
 def copy_engine_for_source(mode: str, source: str | Path) -> str:
@@ -58,6 +60,7 @@ def rclone_arguments(
         f"--transfers={max(1, min(32, int(selected.transfers)))}",
         f"--checkers={max(1, min(64, int(selected.checkers)))}",
         f"--buffer-size={max(0, int(selected.buffer_size_mib))}Mi",
+        f"--multi-thread-write-buffer-size={max(1, int(selected.multi_thread_write_buffer_size_mib))}Mi",
         f"--retries={max(1, min(20, int(selected.retries)))}",
         f"--low-level-retries={max(1, min(50, int(selected.low_level_retries)))}",
         "--partial-suffix=.neon-partial",
@@ -68,4 +71,6 @@ def rclone_arguments(
         args.append("--checksum")
     if selected.local_no_sparse:
         args.append("--local-no-sparse")
+    if selected.local_no_preallocate:
+        args.append("--local-no-preallocate")
     return args, target

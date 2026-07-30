@@ -1,5 +1,25 @@
 # Changelog
 
+## 5.4.0-beta.11
+
+- Rejected uploads to the non-writable Google Drive virtual root and explained that
+  users must select My Drive, Shared drives, or a nested folder.
+- Probed destination create-and-rename support before starting a queue and surfaced
+  concrete per-file Rclone or Robocopy errors at the end of failed transfers.
+- Disabled local preallocation in Rclone to avoid Google Drive File Stream corruption
+  and size-check failures while preserving the original final filename and extension.
+- Added a mandatory source-readiness gate that waits for stable size and modification
+  time, active writers to release the file, and temporary partial names to disappear.
+- Rechecks the source after transfer and automatically returns it to the waiting queue
+  if it changed while being copied.
+- Added balanced, fast, maximum, extreme, and manual Rclone traffic profiles while
+  preserving the single Rclone process limit.
+- Expanded large-file tuning to 32 streams, 32 folder transfers, 64 checkers, and
+  configurable per-thread write buffering.
+- Modernized the transfer pages with clearer direction headers, compact actions,
+  refined cards and navigation surfaces, and start controls that remain visible in
+  the small-window layout.
+
 ## 5.4.0-beta.10
 
 - Limited Rclone and hybrid transfers to one Rclone process at a time while keeping

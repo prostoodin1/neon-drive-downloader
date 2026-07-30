@@ -22,8 +22,11 @@ from neon_drive.app import (
     RcloneDownloader,
     TaskInfo,
     TurboFileDownloader,
+    destination_write_problem,
     destination_collisions,
     robocopy_arguments,
+    source_snapshot,
+    upload_destination_requirement,
 )
 
 
@@ -42,6 +45,47 @@ class ProgressParserTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.app = QApplication.instance() or QApplication([])
+
+    def test_upload_drive_root_requires_a_real_google_drive_folder(self) -> None:
+        message = upload_destination_requirement(Path("G:\\"))
+
+        self.assertIsNotNone(message)
+        self.assertIn("My Drive", message or "")
+
+    def test_destination_probe_preserves_folder_contents(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            destination = Path(temp_dir)
+
+            self.assertIsNone(destination_write_problem(destination))
+            self.assertEqual(list(destination.iterdir()), [])
+
+    def test_source_snapshot_waits_for_partial_files(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir) / "movie.mp4.neon-partial"
+            source.write_bytes(b"unfinished")
+
+            signature, message = source_snapshot(source)
+
+            self.assertIsNone(signature)
+            self.assertIn("ещё не готов", message or "")
+
+    def test_source_gate_resets_when_file_size_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir) / "movie.mp4"
+            source.write_bytes(b"first")
+            window = MainWindow()
+            window.notifications_check.setChecked(False)
+            task = TaskInfo(str(source), source.stat().st_size)
+
+            with patch("neon_drive.app.time.monotonic", side_effect=[100.0, 101.0, 105.0]):
+                self.assertFalse(window.source_ready_for_transfer(task))
+                source.write_bytes(b"second version")
+                self.assertFalse(window.source_ready_for_transfer(task))
+                self.assertTrue(window.source_ready_for_transfer(task))
+
+            self.assertEqual(task.size, len(b"second version"))
+            window.force_exit = True
+            window.close()
 
     def test_counts_inline_and_wrapped_robocopy_paths(self) -> None:
         downloader = Downloader()
@@ -281,6 +325,34 @@ class StopAfterCurrentFileTests(unittest.TestCase):
 
         window.force_exit = True
         window.close()
+
+    def test_source_changed_during_copy_is_returned_to_waiting_queue(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir) / "recording.mp4"
+            source.write_bytes(b"initial")
+            signature, problem = source_snapshot(source)
+            self.assertIsNone(problem)
+
+            window = MainWindow()
+            window.notifications_check.setChecked(False)
+            window.running = True
+            window.total_items = 1
+            window.total_bytes = len(b"initial")
+            task = TaskInfo(str(source), len(b"initial"), source_signature=signature)
+            window.tasks = {str(source): task}
+            window.workers = {str(source): FakeWorker()}
+
+            source.write_bytes(b"changed while copying")
+            window.on_item_done(True, str(source))
+
+            self.assertEqual(window.completed_items, 0)
+            self.assertIn(str(source), window.queue)
+            self.assertEqual(task.status, "ОЖИДАНИЕ ИСХОДНИКА")
+            window.source_check_timer.stop()
+            window.running = False
+            window.queue.clear()
+            window.force_exit = True
+            window.close()
 
     def test_rclone_and_hybrid_modes_use_only_one_process(self) -> None:
         window = MainWindow()
@@ -524,6 +596,31 @@ class StopAfterCurrentFileTests(unittest.TestCase):
         window.force_exit = True
         window.close()
 
+    def test_rclone_maximum_profile_uses_one_process_with_more_internal_threads(self) -> None:
+        window = MainWindow()
+        window.notifications_check.setChecked(False)
+        window.copy_engine_combo.setCurrentIndex(
+            window.copy_engine_combo.findData("rclone")
+        )
+        window.rclone_performance_combo.setCurrentIndex(
+            window.rclone_performance_combo.findData("maximum")
+        )
+
+        options = window.selected_rclone_options()
+        self.assertEqual(options.multi_thread_streams, 16)
+        self.assertEqual(options.transfers, 12)
+        self.assertEqual(options.checkers, 32)
+        self.assertEqual(options.buffer_size_mib, 64)
+        self.assertEqual(options.multi_thread_write_buffer_size_mib, 4)
+        self.assertEqual(window.download_mode_combo.currentData(), "sequential")
+
+        window.rclone_streams_combo.setCurrentIndex(
+            window.rclone_streams_combo.findData(32)
+        )
+        self.assertEqual(window.rclone_performance_combo.currentData(), "manual")
+        window.force_exit = True
+        window.close()
+
     def test_window_presets_and_transfer_pages_own_their_status_controls(self) -> None:
         window = MainWindow()
         window.notifications_check.setChecked(False)
@@ -536,8 +633,8 @@ class StopAfterCurrentFileTests(unittest.TestCase):
         self.assertTrue(window.upload_page.isAncestorOf(upload.start_button))
         self.assertFalse(window.settings_page.isAncestorOf(download.status_card))
         self.assertFalse(window.updates_page.isAncestorOf(upload.status_card))
-        self.assertEqual(download.start_button.text(), "Начать загрузку")
-        self.assertEqual(upload.start_button.text(), "Начать выгрузку")
+        self.assertEqual(download.start_button.text(), "↓ НАЧАТЬ ЗАГРУЗКУ")
+        self.assertEqual(upload.start_button.text(), "↑ НАЧАТЬ ВЫГРУЗКУ")
 
         window.window_size_combo.setCurrentIndex(
             window.window_size_combo.findData("small")
@@ -667,7 +764,7 @@ class StopAfterCurrentFileTests(unittest.TestCase):
             window.tabs.setCurrentIndex(window.upload_tab_index)
             self.assertEqual(window.tabs.tabText(window.upload_tab_index), "Выгрузка")
             self.assertEqual(window.active_transfer, "upload")
-            self.assertEqual(window.start_button.text(), "Начать выгрузку")
+            self.assertEqual(window.start_button.text(), "↑ НАЧАТЬ ВЫГРУЗКУ")
             self.assertIn("1.0.0-beta.1", window.addon_status_badge.text())
 
             window.upload_sources.setPlainText(str(source))

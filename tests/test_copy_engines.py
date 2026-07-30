@@ -25,6 +25,7 @@ class CopyEngineTests(unittest.TestCase):
                 transfers=4,
                 checkers=16,
                 buffer_size_mib=32,
+                multi_thread_write_buffer_size_mib=4,
                 retries=5,
                 low_level_retries=20,
                 checksum=True,
@@ -37,7 +38,9 @@ class CopyEngineTests(unittest.TestCase):
             self.assertIn("--multi-thread-chunk-size=128Mi", args)
             self.assertIn("--multi-thread-cutoff=512Mi", args)
             self.assertIn("--multi-thread-streams=8", args)
+            self.assertIn("--multi-thread-write-buffer-size=4Mi", args)
             self.assertIn("--checksum", args)
+            self.assertIn("--local-no-preallocate", args)
 
     def test_rclone_directory_keeps_the_source_folder_name(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
