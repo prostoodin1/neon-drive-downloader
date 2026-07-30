@@ -94,6 +94,7 @@ from .rclone_manager import (
     installed_rclone_path,
     installed_rclone_version,
 )
+from .system_health import SystemHealthReport, run_system_health_check
 from .updater import (
     REPOSITORY,
     SETUP_ASSET_NAME,
@@ -1075,6 +1076,45 @@ class RcloneInstallThread(QThread):
         self.succeeded.emit(str(path), version)
 
 
+class SystemHealthThread(QThread):
+    progress = Signal(int, str)
+    succeeded = Signal(object)
+    failed = Signal(str)
+
+    def __init__(
+        self,
+        *,
+        app_root: Path,
+        rclone_candidate: str | None,
+        download_destination: str,
+        upload_destination: str,
+        sources: list[str],
+        parent=None,
+    ) -> None:
+        super().__init__(parent)
+        self.app_root = app_root
+        self.rclone_candidate = rclone_candidate
+        self.download_destination = download_destination
+        self.upload_destination = upload_destination
+        self.sources = list(sources)
+
+    def run(self) -> None:
+        try:
+            report = run_system_health_check(
+                app_root=self.app_root,
+                rclone_candidate=self.rclone_candidate,
+                download_destination=self.download_destination,
+                upload_destination=self.upload_destination,
+                sources=self.sources,
+                repair=True,
+                progress=lambda percent, message: self.progress.emit(percent, message),
+            )
+        except Exception as exc:
+            self.failed.emit(str(exc))
+            return
+        self.succeeded.emit(report)
+
+
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -1119,6 +1159,7 @@ class MainWindow(QMainWindow):
         self.release_history: list[dict] = []
         self.addon_install_thread: AddonInstallThread | None = None
         self.rclone_install_thread: RcloneInstallThread | None = None
+        self.system_health_thread: SystemHealthThread | None = None
         self.robocopy_executable = "robocopy.exe"
         self.rclone_executable = "rclone.exe"
         self.beta_build = is_beta_build(__version__)
@@ -1839,6 +1880,41 @@ class MainWindow(QMainWindow):
         grid.setHorizontalSpacing(12)
         grid.setVerticalSpacing(12)
 
+        health_card, health_box = self.settings_section("ДИАГНОСТИКА И АВТОМАТИЧЕСКОЕ ИСПРАВЛЕНИЕ")
+        health_header = QHBoxLayout()
+        self.system_health_status = QLabel("●  СИСТЕМА ЕЩЁ НЕ ПРОВЕРЕНА")
+        self.system_health_status.setObjectName("systemHealthStatus")
+        self.system_health_status.setProperty("state", "idle")
+        health_header.addWidget(self.system_health_status)
+        health_header.addStretch()
+        self.system_health_button = QPushButton("ПРОВЕРИТЬ И ИСПРАВИТЬ")
+        self.system_health_button.setObjectName("primarySmall")
+        self.system_health_button.clicked.connect(self.start_system_health_check)
+        health_header.addWidget(self.system_health_button)
+        health_box.addLayout(health_header)
+        health_note = QLabel(
+            "Проверяет Robocopy, Rclone, интернет, свободное место, папки приложения, "
+            "Google Drive и выбранные пути. Недостающие служебные папки и Rclone "
+            "восстанавливаются автоматически с проверкой SHA-256."
+        )
+        health_note.setObjectName("settingDescription")
+        health_note.setWordWrap(True)
+        health_box.addWidget(health_note)
+        self.system_health_progress = QProgressBar()
+        self.system_health_progress.setRange(0, 100)
+        self.system_health_progress.setValue(0)
+        self.system_health_progress.setFormat("Ожидание запуска…")
+        self.system_health_progress.setVisible(False)
+        health_box.addWidget(self.system_health_progress)
+        self.system_health_summary = QLabel(
+            "Безопасные исправления выполняются автоматически; системные ограничения "
+            "будут показаны отдельным отчётом."
+        )
+        self.system_health_summary.setObjectName("settingDescription")
+        self.system_health_summary.setWordWrap(True)
+        health_box.addWidget(self.system_health_summary)
+        grid.addWidget(health_card, 0, 0, 1, 2)
+
         mode_card, mode_box = self.settings_section("ПРОСТОЙ И РАСШИРЕННЫЙ РЕЖИМ")
         mode_note = QLabel(
             "В простом режиме скрыты терминал и технические параметры. Включите Advanced mode, "
@@ -1887,7 +1963,7 @@ class MainWindow(QMainWindow):
         memory_note.setObjectName("settingDescription")
         memory_note.setWordWrap(True)
         mode_box.addWidget(memory_note)
-        grid.addWidget(mode_card, 0, 0, 1, 2)
+        grid.addWidget(mode_card, 1, 0, 1, 2)
 
         theme_card, theme_box = self.settings_section("ТЕМА ПРИЛОЖЕНИЯ")
         theme_box.addWidget(QLabel("Основная тема"))
@@ -1912,7 +1988,7 @@ class MainWindow(QMainWindow):
         self.accent_all_buttons_check = self.add_setting_toggle(
             theme_box, "Красить выбранным цветом все основные кнопки"
         )
-        grid.addWidget(theme_card, 1, 0)
+        grid.addWidget(theme_card, 2, 0)
 
         design_card, design_box = self.settings_section("РЕЖИМ ДИЗАЙНА")
         design_box.addWidget(QLabel("Плотность и форма интерфейса"))
@@ -1928,7 +2004,7 @@ class MainWindow(QMainWindow):
         self.design_mode_note.setObjectName("settingDescription")
         self.design_mode_note.setWordWrap(True)
         design_box.addWidget(self.design_mode_note)
-        grid.addWidget(design_card, 1, 1)
+        grid.addWidget(design_card, 2, 1)
 
         motion_card, motion_box = self.settings_section("ПЛАВНОСТЬ И АНИМАЦИИ")
         self.animations_check = self.add_setting_toggle(
@@ -1941,11 +2017,11 @@ class MainWindow(QMainWindow):
         motion_note.setObjectName("settingDescription")
         motion_note.setWordWrap(True)
         motion_box.addWidget(motion_note)
-        grid.addWidget(motion_card, 2, 0, 1, 2)
+        grid.addWidget(motion_card, 3, 0, 1, 2)
 
         grid.setColumnStretch(0, 1)
         grid.setColumnStretch(1, 1)
-        grid.setRowStretch(2, 1)
+        grid.setRowStretch(3, 1)
         layout.addWidget(self.settings_scroll(grid), 1)
         return page
 
@@ -2325,6 +2401,11 @@ class MainWindow(QMainWindow):
             #settingDescription {{ color: {colors['muted']}; padding: 3px 0; }}
             #performanceNotice {{ color: {green}; background: {colors['input']}; border: 1px solid {colors['border']}; border-radius: {metrics['radius']}px; padding: 7px 9px; font-size: 11px; font-weight: 650; }}
             #performanceNotice[warning="true"] {{ color: #ffb84d; border-color: #8f5c18; }}
+            #systemHealthStatus {{ color: {colors['muted']}; background: {colors['input']}; border: 1px solid {colors['border']}; border-radius: {metrics['radius']}px; padding: 6px 9px; font-size: 11px; font-weight: 750; }}
+            #systemHealthStatus[state="running"] {{ color: {accent}; border-color: {accent}; }}
+            #systemHealthStatus[state="ok"] {{ color: {green}; border-color: {green}; }}
+            #systemHealthStatus[state="warning"] {{ color: #ffb84d; border-color: #8f5c18; }}
+            #systemHealthStatus[state="error"] {{ color: #ff647f; border-color: #ff647f; }}
             #separator {{ color: {colors['border']}; margin: 10px 0; }}
             #updateButton {{ color: {green}; border-color: {green}; }}
             #betaBadge {{ color: {accent}; background: {colors['input']}; border: 1px solid {accent}; border-radius: {metrics['radius']}px; padding: 3px 8px; font-size: 10px; font-weight: 800; letter-spacing: 1px; }}
@@ -2989,6 +3070,122 @@ class MainWindow(QMainWindow):
         )
         self.rclone_install_thread = None
         self.refresh_engine_status()
+
+    def set_system_health_state(self, state: str, text: str) -> None:
+        self.system_health_status.setText(text)
+        self.system_health_status.setProperty("state", state)
+        self.system_health_status.style().unpolish(self.system_health_status)
+        self.system_health_status.style().polish(self.system_health_status)
+
+    def start_system_health_check(self) -> None:
+        if self.system_health_thread is not None and self.system_health_thread.isRunning():
+            return
+        if self.running or self.workers or self.turbo_workers:
+            QMessageBox.warning(
+                self,
+                APP_NAME,
+                "Дождитесь завершения загрузки или выгрузки. Диагностика может "
+                "переустановить Rclone, поэтому она запускается только без активных задач.",
+            )
+            return
+        if self.rclone_install_thread is not None and self.rclone_install_thread.isRunning():
+            QMessageBox.information(
+                self,
+                APP_NAME,
+                "Установка Rclone уже выполняется. Дождитесь её завершения и повторите проверку.",
+            )
+            return
+
+        self.persist_settings()
+        self.system_health_button.setEnabled(False)
+        self.system_health_button.setText("ПРОВЕРКА…")
+        self.system_health_progress.setValue(0)
+        self.system_health_progress.setFormat("Подготовка диагностики…")
+        self.system_health_progress.show()
+        self.system_health_summary.setText(
+            "Не закрывайте приложение: идёт проверка и безопасное восстановление компонентов."
+        )
+        self.set_system_health_state("running", "◌  ИДЁТ ПОЛНАЯ ПРОВЕРКА")
+        sources = [
+            line.strip()
+            for line in (
+                self.sources.toPlainText().splitlines()
+                + self.upload_sources.toPlainText().splitlines()
+            )
+            if line.strip()
+        ]
+        thread = SystemHealthThread(
+            app_root=app_data_dir(),
+            rclone_candidate=self.resolved_rclone_executable(),
+            download_destination=self.destination.text().strip(),
+            upload_destination=self.upload_destination.text().strip(),
+            sources=sources,
+            parent=self,
+        )
+        self.system_health_thread = thread
+        thread.progress.connect(self.system_health_progressed)
+        thread.succeeded.connect(self.system_health_succeeded)
+        thread.failed.connect(self.system_health_failed)
+        thread.finished.connect(self.system_health_finished)
+        thread.start()
+
+    @Slot(int, str)
+    def system_health_progressed(self, percent: int, message: str) -> None:
+        self.system_health_progress.setValue(max(0, min(100, percent)))
+        self.system_health_progress.setFormat(f"{message}  ·  {percent}%")
+
+    @Slot(object)
+    def system_health_succeeded(self, report: SystemHealthReport) -> None:
+        if report.rclone_path:
+            self.rclone_path_edit.setText(report.rclone_path)
+            self.settings.setValue("rclone_path", report.rclone_path)
+            self.settings.sync()
+        self.refresh_engine_status()
+        if report.error_count:
+            state = "error"
+            title = "!  ТРЕБУЕТСЯ ВНИМАНИЕ"
+        elif report.warning_count:
+            state = "warning"
+            title = "●  ПРОВЕРЕНО · ЕСТЬ РЕКОМЕНДАЦИИ"
+        else:
+            state = "ok"
+            title = "✓  СИСТЕМА ИСПРАВНА"
+        self.set_system_health_state(state, title)
+        self.system_health_summary.setText(
+            f"Проверок: {len(report.items)} · исправлено: {report.fixed_count} · "
+            f"предупреждений: {report.warning_count} · ошибок: {report.error_count}."
+        )
+        icons = {"ok": "✓", "fixed": "↻", "warning": "!", "error": "✕"}
+        lines = [
+            f"{icons.get(item.status, '•')} {item.name}: {item.details}"
+            for item in report.items
+        ]
+        self.append_log("\nСИСТЕМНАЯ ДИАГНОСТИКА\n" + "\n".join(lines) + "\n")
+        message = self.system_health_summary.text() + "\n\n" + "\n".join(lines)
+        if report.error_count:
+            QMessageBox.critical(self, "Диагностика Neon Drive", message)
+        elif report.warning_count:
+            QMessageBox.warning(self, "Диагностика Neon Drive", message)
+        else:
+            QMessageBox.information(self, "Диагностика Neon Drive", message)
+
+    @Slot(str)
+    def system_health_failed(self, message: str) -> None:
+        self.set_system_health_state("error", "✕  ПРОВЕРКА ПРЕРВАНА")
+        self.system_health_summary.setText(message)
+        self.append_log(f"Системная диагностика: {message}\n")
+        QMessageBox.critical(
+            self,
+            "Диагностика Neon Drive",
+            f"Не удалось завершить диагностику:\n{message}",
+        )
+
+    @Slot()
+    def system_health_finished(self) -> None:
+        self.system_health_progress.setValue(100)
+        self.system_health_button.setEnabled(True)
+        self.system_health_button.setText("ПРОВЕРИТЬ ЕЩЁ РАЗ")
+        self.system_health_thread = None
 
     def resolved_rclone_executable(self) -> str | None:
         custom = self.rclone_path_edit.text().strip() if hasattr(self, "rclone_path_edit") else ""
@@ -4374,6 +4571,14 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:  # noqa: N802
         self.persist_settings()
+        if self.system_health_thread is not None and self.system_health_thread.isRunning():
+            QMessageBox.information(
+                self,
+                APP_NAME,
+                "Дождитесь завершения диагностики и автоматического исправления системы.",
+            )
+            event.ignore()
+            return
         if self.rclone_install_thread is not None and self.rclone_install_thread.isRunning():
             QMessageBox.information(
                 self,

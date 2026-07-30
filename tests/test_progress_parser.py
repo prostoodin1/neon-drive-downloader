@@ -596,6 +596,18 @@ class StopAfterCurrentFileTests(unittest.TestCase):
         window.force_exit = True
         window.close()
 
+    def test_settings_expose_background_system_health_repair(self) -> None:
+        window = MainWindow()
+        window.notifications_check.setChecked(False)
+
+        self.assertEqual(window.system_health_button.text(), "ПРОВЕРИТЬ И ИСПРАВИТЬ")
+        self.assertEqual(window.system_health_status.property("state"), "idle")
+        self.assertFalse(window.system_health_progress.isVisible())
+        self.assertIsNone(window.system_health_thread)
+
+        window.force_exit = True
+        window.close()
+
     def test_rclone_maximum_profile_uses_one_process_with_more_internal_threads(self) -> None:
         window = MainWindow()
         window.notifications_check.setChecked(False)

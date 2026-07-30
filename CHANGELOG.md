@@ -1,5 +1,14 @@
 # Changelog
 
+## 5.4.0-beta.12
+
+- Added a background system diagnostics card to Settings with a one-click
+  “check and repair” action and a detailed result report.
+- Checks Robocopy, Rclone, official download connectivity, free disk space,
+  application folders, configured destinations, Google Drive, and selected sources.
+- Safely creates missing service/download folders and automatically installs or
+  repairs the official Rclone build after SHA-256 verification.
+
 ## 5.4.0-beta.11
 
 - Rejected uploads to the non-writable Google Drive virtual root and explained that
