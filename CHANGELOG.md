@@ -1,5 +1,18 @@
 # Changelog
 
+## 5.5.0-beta.1
+
+- Added a separate `NeonDriveInstaller.exe` version manager that lists GitHub
+  releases, displays their changelogs, and installs either new or previous versions.
+- Included the version manager in the universal setup and added a shortcut from
+  the Updates page and the Windows Start menu.
+- Redesigned the main application around a clean light interface with side
+  navigation enabled by default and a compact collapsible menu.
+- Added a dedicated Templates page with Slow, Optimal, and Maximum transfer cards
+  shared by downloads and uploads.
+- Kept releases ZIP-free: every release contains the application setup and the
+  separate version manager executable.
+
 ## 5.4.0-beta.13
 
 - Renamed the product to Neon Drive and made the light theme the default for new installs.

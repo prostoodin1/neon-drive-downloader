@@ -1,9 +1,9 @@
 #ifndef MyAppVersion
-  #define MyAppVersion "5.4.0-beta.13"
+  #define MyAppVersion "5.5.0-beta.1"
 #endif
 
 #ifndef MyAppFileVersion
-  #define MyAppFileVersion "5.4.0.13"
+  #define MyAppFileVersion "5.5.0.1"
 #endif
 
 #define MyAppName "Neon Drive"
@@ -44,9 +44,11 @@ Name: "desktopicon"; Description: "Создать ярлык на рабочем
 
 [Files]
 Source: "dist\NeonDriveDownloader\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "dist\NeonDriveInstaller.exe"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
+Name: "{autoprograms}\Neon Drive Installer"; Filename: "{app}\NeonDriveInstaller.exe"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
 
 [Registry]

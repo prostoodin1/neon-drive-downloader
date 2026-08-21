@@ -15,6 +15,7 @@ from neon_drive.addons import (
     remove_upload_addon,
     upload_addon_github_url,
     upload_addon_installed,
+    validate_upload_addon,
 )
 
 
@@ -57,6 +58,16 @@ class UploadAddonTests(unittest.TestCase):
         url = upload_addon_github_url("5.4.0-beta.4")
         self.assertIn("/v5.4.0-beta.4/", url)
         self.assertTrue(url.endswith(f"/addons/{UPLOAD_ADDON_FILE}"))
+
+    def test_previous_minor_addon_remains_compatible_with_v55(self) -> None:
+        manifest = {
+            "schema": 1,
+            "id": "neon-uploader",
+            "entry": "builtin:upload",
+            "compatible_app_prefix": "5.4",
+        }
+
+        self.assertIs(validate_upload_addon(manifest, "5.5.0-beta.1"), manifest)
 
 
 if __name__ == "__main__":

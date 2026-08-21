@@ -19,10 +19,12 @@ from . import __version__
 
 REPOSITORY = "prostoodin1/neon-drive-downloader"
 SETUP_ASSET_NAME = "NeonDrive-Setup.exe"
+PREVIOUS_SETUP_ASSET_NAME = "NeonDriveDownloader-Setup.exe"
 LEGACY_ASSET_NAME = "NeonDriveDownloader.exe"
-ASSET_NAMES = (SETUP_ASSET_NAME, LEGACY_ASSET_NAME)
+SETUP_ASSET_NAMES = (SETUP_ASSET_NAME, PREVIOUS_SETUP_ASSET_NAME)
+ASSET_NAMES = (*SETUP_ASSET_NAMES, LEGACY_ASSET_NAME)
 API_URL = f"https://api.github.com/repos/{REPOSITORY}/releases/latest"
-RELEASES_URL = f"https://api.github.com/repos/{REPOSITORY}/releases?per_page=20"
+RELEASES_URL = f"https://api.github.com/repos/{REPOSITORY}/releases?per_page=100"
 LAST_DOWNLOAD_DIRECTORY = "last-download"
 LAST_DOWNLOAD_METADATA = "release.json"
 
@@ -98,7 +100,11 @@ def _private_json(endpoint: str) -> object:
 
 def _release_data(latest: bool = True) -> tuple[object, str]:
     url = API_URL if latest else RELEASES_URL
-    endpoint = f"repos/{REPOSITORY}/releases/latest" if latest else f"repos/{REPOSITORY}/releases?per_page=20"
+    endpoint = (
+        f"repos/{REPOSITORY}/releases/latest"
+        if latest
+        else f"repos/{REPOSITORY}/releases?per_page=100"
+    )
     try:
         return _public_json(url), "public"
     except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, json.JSONDecodeError):
@@ -118,7 +124,7 @@ def _normalize_release(data: dict, method: str) -> dict:
         )
     asset_name = str(asset.get("name") or LEGACY_ASSET_NAME)
     migration = (
-        asset_name == SETUP_ASSET_NAME
+        asset_name in SETUP_ASSET_NAMES
         and running_onefile()
         and version_tuple(tag) == version_tuple(__version__)
     )
@@ -277,7 +283,7 @@ def launch_replacement(downloaded: Path, current_executable: Path) -> None:
     if not getattr(sys, "frozen", False):
         raise RuntimeError("Автоустановка доступна только в собранной EXE-версии.")
     pid_to_wait = bootloader_parent_pid(current_executable)
-    if downloaded.name.casefold() == SETUP_ASSET_NAME.casefold():
+    if downloaded.name.casefold() in {name.casefold() for name in SETUP_ASSET_NAMES}:
         bundle_dir = Path(str(getattr(sys, "_MEIPASS", "")))
         if bundle_dir.name == "_internal":
             install_dir = current_executable.parent

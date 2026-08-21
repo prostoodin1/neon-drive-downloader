@@ -51,7 +51,16 @@ def validate_upload_addon(data: object, app_version: str) -> dict:
     if data.get("id") != UPLOAD_ADDON_ID or data.get("entry") != "builtin:upload":
         raise RuntimeError("Пакет не является дополнением «Выгрузка».")
     compatible_prefix = str(data.get("compatible_app_prefix") or "")
-    if compatible_prefix and not app_version.lstrip("vV").startswith(compatible_prefix):
+    normalized_version = app_version.lstrip("vV")
+    same_major = (
+        compatible_prefix.split(".", 1)[0]
+        == normalized_version.split(".", 1)[0]
+    )
+    if (
+        compatible_prefix
+        and not normalized_version.startswith(compatible_prefix)
+        and not same_major
+    ):
         raise RuntimeError(
             f"Дополнение предназначено для Neon Drive {compatible_prefix}.x, "
             f"а установлена версия {app_version}."

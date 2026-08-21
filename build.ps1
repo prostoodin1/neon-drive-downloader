@@ -10,6 +10,8 @@ if ($LASTEXITCODE -ne 0) { throw "Tests failed." }
 if ($LASTEXITCODE -ne 0) { throw "Bundled Rclone preparation failed." }
 & $python -m PyInstaller --noconfirm --clean "NeonDriveDownloader.spec"
 if ($LASTEXITCODE -ne 0) { throw "PyInstaller build failed." }
+& $python -m PyInstaller --noconfirm --clean "NeonDriveInstaller.spec"
+if ($LASTEXITCODE -ne 0) { throw "Version manager build failed." }
 
 $version = & $python -c "from neon_drive import __version__; print(__version__)"
 $versionParts = @(
@@ -34,4 +36,5 @@ if ($iscc) {
 
 Write-Host "Built app: dist\NeonDriveDownloader\NeonDriveDownloader.exe"
 Write-Host "Built hidden agent CLI: dist\NeonDriveDownloader\NeonDriveCLI.exe"
+Write-Host "Built version manager: dist\NeonDriveInstaller.exe"
 if ($iscc) { Write-Host "Built universal installer: dist\NeonDrive-Setup.exe" }

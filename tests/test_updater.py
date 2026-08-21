@@ -83,6 +83,15 @@ class UpdaterTests(unittest.TestCase):
         self.assertEqual(release["asset_name"], updater.SETUP_ASSET_NAME)
         self.assertTrue(release["available"])
 
+    def test_history_accepts_previous_setup_filename(self) -> None:
+        release = updater._normalize_release(
+            release_payload("v5.4.0-beta.13", [updater.PREVIOUS_SETUP_ASSET_NAME]),
+            "public",
+        )
+
+        self.assertEqual(release["asset_name"], updater.PREVIOUS_SETUP_ASSET_NAME)
+        self.assertEqual(release["version"], "5.4.0-beta.13")
+
     def test_same_version_offers_migration_from_onefile(self) -> None:
         with (
             patch.object(updater.sys, "frozen", True, create=True),

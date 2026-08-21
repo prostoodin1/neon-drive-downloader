@@ -30,9 +30,10 @@ jobs:
       - name: Download and verify bundled Rclone
         run: python scripts/fetch_rclone.py
 
-      - name: Build Neon Drive and hidden agent CLI
+      - name: Build Neon Drive, hidden agent CLI, and version manager
         run: |
           python -m PyInstaller --noconfirm --clean NeonDriveDownloader.spec
+          python -m PyInstaller --noconfirm --clean NeonDriveInstaller.spec
 
       - name: Build installer without onefile extraction
         shell: pwsh
@@ -53,7 +54,8 @@ jobs:
         shell: pwsh
         run: |
           $files = @(
-            "dist\NeonDrive-Setup.exe"
+            "dist\NeonDrive-Setup.exe",
+            "dist\NeonDriveInstaller.exe"
           )
           foreach($path in $files) {
             $file = Get-Item $path
@@ -70,6 +72,7 @@ jobs:
           $arguments = @(
             "release", "create", $tag,
             "dist\NeonDrive-Setup.exe",
+            "dist\NeonDriveInstaller.exe",
             "--title", "Neon Drive $tag",
             "--generate-notes"
           )

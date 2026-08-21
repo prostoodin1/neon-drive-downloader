@@ -9,6 +9,7 @@ dist/
 *.spec
 !NeonDriveDownloader.spec
 !NeonDriveDownloader-OneFile.spec
+!NeonDriveInstaller.spec
 vendor/rclone/rclone.exe
 vendor/rclone/install.json
 
