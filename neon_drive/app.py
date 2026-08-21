@@ -90,10 +90,13 @@ from .copy_engines import (
     rclone_arguments,
 )
 from .rclone_manager import (
+    bundled_rclone_path,
+    bundled_rclone_version,
     download_and_install_rclone,
     installed_rclone_path,
     installed_rclone_version,
 )
+from .single_instance import InstanceServer, send_request
 from .system_health import SystemHealthReport, run_system_health_check
 from .updater import (
     REPOSITORY,
@@ -107,7 +110,8 @@ from .updater import (
 from .turbo_copy import TurboCopyStopped, parallel_copy_file
 
 
-APP_NAME = "Neon Drive Downloader"
+APP_NAME = "Neon Drive"
+SETTINGS_APP_NAME = "Neon Drive Downloader"
 MAX_CONCURRENT_DOWNLOADS = 10
 MAX_DIRECTORY_THREADS = 16
 MAX_TURBO_THREADS = 16
@@ -1028,6 +1032,7 @@ class TransferPanel:
     clear_button: QPushButton
     browse_button: QPushButton
     show_destination_button: QPushButton
+    preset_combo: QComboBox
     terminal_card: QFrame
     terminal: QPlainTextEdit
     pause_button: QPushButton
@@ -1127,7 +1132,8 @@ class MainWindow(QMainWindow):
                 QSettings.Scope.UserScope,
                 settings_override,
             )
-        self.settings = QSettings("NeonTools", APP_NAME)
+        # Keep the beta.12 settings namespace so upgrades retain every preference.
+        self.settings = QSettings("NeonTools", SETTINGS_APP_NAME)
         self.queue: deque[str] = deque()
         self.workers: dict[str, Downloader | RcloneDownloader | TurboFileDownloader] = {}
         self.turbo_workers: set[TurboFileDownloader] = set()
@@ -1261,11 +1267,29 @@ class MainWindow(QMainWindow):
             self.advanced_tab_index = self.tabs.addTab(self.advanced_page, "Advanced mode")
         self.updates_page = self.build_updates_tab()
         self.updates_tab_index = self.tabs.addTab(self.updates_page, "Обновления")
+        self.tabs.setTabVisible(self.settings_tab_index, False)
         self._last_tab_index = self.tabs.currentIndex()
         self.tabs.currentChanged.connect(self.animate_tab)
         self.tabs.currentChanged.connect(self.transfer_tab_changed)
         self.tabs.currentChanged.connect(self.remember_active_tab)
         outer.addWidget(self.tabs, 1)
+
+        system_bar = QHBoxLayout()
+        system_bar.setSpacing(8)
+        self.global_system_status = QLabel("●  СИСТЕМА ГОТОВА")
+        self.global_system_status.setObjectName("systemState")
+        self.global_rclone_status = QLabel("Rclone · встроен")
+        self.global_rclone_status.setObjectName("footerInfo")
+        self.settings_gear_button = QPushButton("⚙")
+        self.settings_gear_button.setObjectName("settingsGear")
+        self.settings_gear_button.setFixedSize(34, 34)
+        self.settings_gear_button.setToolTip("Настройки Neon Drive")
+        self.settings_gear_button.clicked.connect(self.toggle_settings_page)
+        system_bar.addWidget(self.global_system_status)
+        system_bar.addStretch()
+        system_bar.addWidget(self.global_rclone_status)
+        system_bar.addWidget(self.settings_gear_button)
+        outer.addLayout(system_bar)
         self.bind_transfer_panel("download")
         self.apply_theme()
 
@@ -1330,6 +1354,14 @@ class MainWindow(QMainWindow):
         hero_row.addLayout(hero_copy, 1)
         hero_row.addWidget(direction_badge, 0, Qt.AlignmentFlag.AlignTop)
         form.addLayout(hero_row)
+        preset_row = QHBoxLayout()
+        preset_row.addWidget(self.label("ПРОФИЛЬ СКОРОСТИ"))
+        preset_combo = QComboBox()
+        preset_combo.addItem("Медленно · минимум нагрузки", "slow")
+        preset_combo.addItem("Оптимально · рекомендуется", "optimal")
+        preset_combo.addItem("Максимально · весь доступный канал", "maximum")
+        preset_row.addWidget(preset_combo, 1)
+        form.addLayout(preset_row)
         form.addWidget(
             self.label("ЛОКАЛЬНЫЕ ФАЙЛЫ И ПАПКИ" if upload else "ФАЙЛЫ И ПАПКИ С GOOGLE DRIVE")
         )
@@ -1457,6 +1489,7 @@ class MainWindow(QMainWindow):
             clear_button=clear_button,
             browse_button=browse_button,
             show_destination_button=show_destination_button,
+            preset_combo=preset_combo,
             terminal_card=terminal_card,
             terminal=terminal,
             pause_button=pause_button,
@@ -1475,6 +1508,11 @@ class MainWindow(QMainWindow):
             footer_info=footer_info,
         )
         self.transfer_panels[direction] = panel
+        preset_combo.currentIndexChanged.connect(
+            lambda _index, selected=preset_combo: self.apply_transfer_preset(
+                str(selected.currentData() or "optimal")
+            )
+        )
         if direction == "download":
             self.sources = sources
             self.destination = destination
@@ -1620,10 +1658,10 @@ class MainWindow(QMainWindow):
         speed_box.addWidget(self.engine_status)
         rclone_path_row = QHBoxLayout()
         self.rclone_path_edit = QLineEdit()
-        self.rclone_path_edit.setPlaceholderText("Автопоиск rclone.exe через PATH")
+        self.rclone_path_edit.setPlaceholderText("Встроенный Rclone выбирается автоматически")
         browse_rclone_button = QPushButton("Выбрать rclone.exe…")
         browse_rclone_button.clicked.connect(self.browse_rclone_executable)
-        self.download_rclone_button = QPushButton("Скачать и подключить")
+        self.download_rclone_button = QPushButton("Переустановить Rclone")
         self.download_rclone_button.setObjectName("primarySmall")
         self.download_rclone_button.clicked.connect(self.start_rclone_install)
         rclone_path_row.addWidget(self.rclone_path_edit, 1)
@@ -1968,9 +2006,9 @@ class MainWindow(QMainWindow):
         theme_card, theme_box = self.settings_section("ТЕМА ПРИЛОЖЕНИЯ")
         theme_box.addWidget(QLabel("Основная тема"))
         self.theme_combo = QComboBox()
-        self.theme_combo.addItem("Чёрный OLED", "oled")
-        self.theme_combo.addItem("Тёмная тема", "dark")
         self.theme_combo.addItem("Светлая тема", "light")
+        self.theme_combo.addItem("Тёмная тема", "dark")
+        self.theme_combo.addItem("Чёрный OLED", "oled")
         theme_box.addWidget(self.theme_combo)
         theme_box.addWidget(QLabel("Цвет кнопок и акцентов"))
         accent_row = QHBoxLayout()
@@ -2184,6 +2222,118 @@ class MainWindow(QMainWindow):
         self.refresh_files_overview()
         self.refresh_upload_addon_ui()
 
+    def toggle_settings_page(self) -> None:
+        """Open settings from the compact bottom gear without exposing a tab."""
+        if self.tabs.currentWidget() is self.settings_page:
+            page = getattr(self, "_page_before_settings", self.download_page)
+            if self.tabs.indexOf(page) < 0 or page is self.settings_page:
+                page = self.download_page
+            self.tabs.setCurrentWidget(page)
+            self.settings_gear_button.setToolTip("Настройки Neon Drive")
+            return
+        self._page_before_settings = self.tabs.currentWidget()
+        self.tabs.setCurrentWidget(self.settings_page)
+        self.settings_gear_button.setToolTip("Вернуться к передаче")
+
+    def apply_transfer_preset(self, preset: str, persist: bool = True) -> None:
+        """Apply the same simple speed preset to Robocopy and Rclone."""
+        preset = preset if preset in ("slow", "optimal", "maximum") else "optimal"
+        mapping = {
+            "slow": ("stable", "balanced", "sequential", 2, 2),
+            "optimal": ("optimized", "fast", "sequential", 8, 8),
+            "maximum": ("maximum", "extreme", "all", 16, 16),
+        }
+        copy_profile, rclone_profile, queue_mode, directory_threads, turbo_threads = mapping[preset]
+        for panel in self.transfer_panels.values():
+            index = panel.preset_combo.findData(preset)
+            if index >= 0 and panel.preset_combo.currentIndex() != index:
+                panel.preset_combo.blockSignals(True)
+                panel.preset_combo.setCurrentIndex(index)
+                panel.preset_combo.blockSignals(False)
+
+        if not hasattr(self, "copy_profile_combo"):
+            return
+
+        def select(combo: QComboBox, value) -> None:
+            index = combo.findData(value)
+            if index >= 0:
+                combo.setCurrentIndex(index)
+
+        select(self.copy_profile_combo, copy_profile)
+        select(self.rclone_performance_combo, rclone_profile)
+        engine = str(self.copy_engine_combo.currentData() or "robocopy")
+        select(self.download_mode_combo, "sequential" if engine in ("rclone", "hybrid") else queue_mode)
+        self.directory_threads_slider.setValue(directory_threads)
+        self.turbo_threads_slider.setValue(turbo_threads)
+        if persist:
+            self.settings.setValue("transfer_preset", preset)
+            self.settings.sync()
+
+    def handle_agent_request(self, request: dict) -> dict:
+        """Handle the hidden local JSON interface used by NeonDriveCLI."""
+        command = str(request.get("command") or "").casefold()
+        if command == "activate":
+            self.show_from_tray()
+            return {"ok": True, "state": "visible", "version": __version__}
+        if command == "status":
+            return {
+                "ok": True,
+                "name": APP_NAME,
+                "version": __version__,
+                "running": self.running,
+                "paused": self.paused,
+                "direction": self.active_transfer,
+                "queued": len(self.queue),
+                "active": len(self.workers) + len(self.turbo_workers),
+                "completed": self.completed_items,
+                "failed": self.failed_items,
+                "speed_bytes_per_second": int(self.speed_bps),
+                "rclone": self.resolved_rclone_executable() or "",
+            }
+        if command in ("pause", "resume"):
+            if not self.running:
+                return {"ok": False, "error": "Нет активной передачи"}
+            if command == "pause" and not self.paused:
+                self.toggle_pause()
+            elif command == "resume" and self.paused:
+                self.toggle_pause()
+            return {"ok": True, "paused": self.paused}
+        if command == "stop":
+            if self.running:
+                QTimer.singleShot(0, self.stop_now)
+            return {"ok": True, "stopping": self.running}
+        if command == "add":
+            if self.running:
+                return {"ok": False, "error": "Дождитесь завершения текущей очереди"}
+            direction = str(request.get("direction") or "download")
+            if direction not in self.transfer_panels:
+                return {"ok": False, "error": "Неизвестное направление передачи"}
+            if direction == "upload" and self.tabs.indexOf(self.upload_page) < 0:
+                return {"ok": False, "error": "Дополнение «Выгрузка» не установлено"}
+            raw_sources = request.get("sources")
+            sources = [str(value).strip() for value in raw_sources or [] if str(value).strip()]
+            destination = str(request.get("destination") or "").strip()
+            if not sources or not destination:
+                return {"ok": False, "error": "Нужны source и destination"}
+            panel = self.transfer_panels[direction]
+            panel.sources.setPlainText("\n".join(sources))
+            panel.destination.setText(destination)
+            preset = str(request.get("profile") or "optimal")
+            self.apply_transfer_preset(preset)
+            self.tabs.setCurrentWidget(panel.page)
+            self.active_transfer = direction
+            if bool(request.get("start")):
+                QTimer.singleShot(0, lambda: self.start_transfers(direction))
+            return {
+                "ok": True,
+                "direction": direction,
+                "sources": len(sources),
+                "destination": destination,
+                "profile": preset,
+                "started": bool(request.get("start")),
+            }
+        return {"ok": False, "error": f"Неизвестная команда: {command}"}
+
     def start_upload_addon_install(self) -> None:
         if not self.beta_build:
             return
@@ -2249,7 +2399,7 @@ class MainWindow(QMainWindow):
             self.file_display_radios[index].setChecked(True)
 
     def apply_theme(self) -> None:
-        theme = self.theme_combo.currentData() if hasattr(self, "theme_combo") else "oled"
+        theme = self.theme_combo.currentData() if hasattr(self, "theme_combo") else "light"
         design = (
             self.design_mode_combo.currentData()
             if hasattr(self, "design_mode_combo")
@@ -2306,7 +2456,7 @@ class MainWindow(QMainWindow):
                 "button": "#e6edf1", "track": "#d9e3e8", "terminal": "#101820",
             },
         }
-        colors = themes.get(str(theme), themes["oled"])
+        colors = themes.get(str(theme), themes["light"])
         root_background = (
             f"qlineargradient(x1:0, y1:0, x2:1, y2:1, "
             f"stop:0 {colors['background']}, stop:1 {colors['input']})"
@@ -2359,6 +2509,7 @@ class MainWindow(QMainWindow):
             #transferSubtitle {{ color: {colors['muted']}; font-size: 11px; padding-top: 1px; }}
             #state {{ color: {accent}; background: {colors['card']}; border: 1px solid {accent}; border-radius: {metrics['radius'] + 4}px; padding: {metrics['button_v']}px {metrics['button_h'] + 1}px; }}
             #footerInfo {{ color: {colors['muted']}; }}
+            #systemState {{ color: {green}; font-size: 11px; font-weight: 750; }}
             #card, #fileRow, #filesCard, #terminalCard, #statusCard {{ background: {colors['card']}; border: 1px solid {colors['border']}; border-radius: {metrics['card_radius']}px; }}
             #heroCard {{ background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 {colors['card']}, stop:1 {colors['input']}); border: 1px solid {accent_color.darker(170).name()}; border-radius: {metrics['card_radius'] + 2}px; }}
             #statusCard {{ border-color: {accent_color.darker(190).name()}; }}
@@ -2396,6 +2547,8 @@ class MainWindow(QMainWindow):
             QTabBar::tab:hover {{ color: {accent_hover}; border-color: {accent}; }}
             #navToggle {{ background: {colors['card']}; color: {accent}; border: 1px solid {colors['border']}; border-radius: {metrics['radius']}px; padding: 0; font-size: 21px; font-weight: 700; }}
             #navToggle:hover {{ background: {colors['input']}; border-color: {accent}; color: {accent_hover}; }}
+            #settingsGear {{ background: {colors['card']}; color: {colors['muted']}; border: 1px solid {colors['border']}; border-radius: 17px; padding: 0; font-size: 17px; }}
+            #settingsGear:hover {{ background: {colors['input']}; color: {accent}; border-color: {accent}; }}
             #settingCheck, #settingToggle {{ font-size: 12px; spacing: 8px; padding: 3px 0; }}
             #sectionTitle {{ font-size: {metrics['section']}px; font-weight: 750; padding-bottom: 5px; }}
             #settingDescription {{ color: {colors['muted']}; padding: 3px 0; }}
@@ -2515,7 +2668,7 @@ class MainWindow(QMainWindow):
         self.show_destination_links_check.setChecked(
             self.settings.value("show_destination_links", True, type=bool)
         )
-        select(self.theme_combo, self.settings.value("theme", "oled"))
+        select(self.theme_combo, self.settings.value("theme", "light"))
         select(self.design_mode_combo, self.settings.value("design_mode", "compact"))
         stored_accent = str(self.settings.value("accent_color", "#00e8f5"))
         accent_index = self.accent_combo.findData(stored_accent)
@@ -2551,6 +2704,10 @@ class MainWindow(QMainWindow):
         self.sources.setPlainText(self.settings.value("sources", ""))
         self.upload_destination.setText(self.settings.value("upload_destination", ""))
         self.upload_sources.setPlainText(self.settings.value("upload_sources", ""))
+        self.apply_transfer_preset(
+            str(self.settings.value("transfer_preset", "optimal")),
+            persist=False,
+        )
 
         for signal in (
             self.advanced_mode_check.stateChanged,
@@ -2666,6 +2823,10 @@ class MainWindow(QMainWindow):
         self.settings.setValue("sources", self.sources.toPlainText())
         self.settings.setValue("upload_destination", self.upload_destination.text())
         self.settings.setValue("upload_sources", self.upload_sources.toPlainText())
+        active_panel = self.current_transfer_panel()
+        self.settings.setValue(
+            "transfer_preset", active_panel.preset_combo.currentData() or "optimal"
+        )
         self.settings.sync()
 
     def settings_changed(self, *_args) -> None:
@@ -2983,6 +3144,8 @@ class MainWindow(QMainWindow):
             page = self.settings_page if key in ("files", "advanced") else self.download_page
         self.tabs.setCurrentWidget(page)
         self.settings.setValue("active_tab", self.tab_key(page))
+        if hasattr(self, "settings_gear_button") and page is self.settings_page:
+            self.settings_gear_button.setToolTip("Вернуться к передаче")
 
     def set_files_tab_visible(self, visible: bool) -> None:
         if not hasattr(self, "files_page"):
@@ -3024,8 +3187,9 @@ class MainWindow(QMainWindow):
                 "дождитесь завершения процесса и повторите обновление.",
             )
             return
+        self._stop_orphaned_rclone_processes()
         self.download_rclone_button.setEnabled(False)
-        self.download_rclone_button.setText("Скачивание…")
+        self.download_rclone_button.setText("Переустановка…")
         self.rclone_install_progress.setValue(0)
         self.rclone_install_progress.setFormat("Подготовка загрузки Rclone…")
         self.rclone_install_progress.show()
@@ -3065,11 +3229,29 @@ class MainWindow(QMainWindow):
     @Slot()
     def rclone_install_finished(self) -> None:
         self.download_rclone_button.setEnabled(True)
-        self.download_rclone_button.setText(
-            "Обновить Rclone" if installed_rclone_path() else "Скачать и подключить"
-        )
+        self.download_rclone_button.setText("Переустановить Rclone")
         self.rclone_install_thread = None
         self.refresh_engine_status()
+
+    def _stop_orphaned_rclone_processes(self) -> int:
+        """Stop only stale Rclone processes that belong to this Neon installation."""
+        candidates = {
+            os.path.normcase(str(path.resolve()))
+            for path in (installed_rclone_path(), bundled_rclone_path())
+            if path is not None
+        }
+        stopped = 0
+        for process in psutil.process_iter(("pid", "exe", "name")):
+            try:
+                executable = process.info.get("exe") or ""
+                if not executable or os.path.normcase(str(Path(executable).resolve())) not in candidates:
+                    continue
+                process.terminate()
+                process.wait(timeout=3)
+                stopped += 1
+            except (psutil.Error, OSError):
+                continue
+        return stopped
 
     def set_system_health_state(self, state: str, text: str) -> None:
         self.system_health_status.setText(text)
@@ -3196,6 +3378,9 @@ class MainWindow(QMainWindow):
         managed = installed_rclone_path()
         if managed:
             return str(managed)
+        bundled = bundled_rclone_path()
+        if bundled:
+            return str(bundled)
         return shutil.which("rclone.exe") or shutil.which("rclone")
 
     def refresh_engine_status(self) -> None:
@@ -3208,18 +3393,21 @@ class MainWindow(QMainWindow):
         if engine == "hybrid":
             required_ready = robocopy_ready and bool(rclone_path)
         robo_text = "готов" if robocopy_ready else "не найден"
-        managed_version = installed_rclone_version()
+        managed_version = installed_rclone_version() or bundled_rclone_version()
+        managed_paths = {path for path in (installed_rclone_path(), bundled_rclone_path()) if path}
         rclone_text = (
             f"{managed_version} · подключён"
-            if rclone_path and managed_version and installed_rclone_path() == Path(rclone_path)
+            if rclone_path and managed_version and Path(rclone_path) in managed_paths
             else Path(rclone_path).name if rclone_path else "не найден"
         )
         self.engine_status.setText(
             f"Robocopy: {robo_text}   ·   Rclone: {rclone_text}"
         )
         if hasattr(self, "download_rclone_button") and self.rclone_install_thread is None:
-            self.download_rclone_button.setText(
-                "Обновить Rclone" if installed_rclone_path() else "Скачать и подключить"
+            self.download_rclone_button.setText("Переустановить Rclone")
+        if hasattr(self, "global_rclone_status"):
+            self.global_rclone_status.setText(
+                "Rclone · встроен и готов" if rclone_path else "Rclone · требуется восстановление"
             )
         self.engine_status.setProperty("ready", required_ready)
         self.engine_status.style().unpolish(self.engine_status)
@@ -4289,6 +4477,8 @@ class MainWindow(QMainWindow):
 
     def set_state(self, text: str) -> None:
         self.state_label.setText(text)
+        if hasattr(self, "global_system_status"):
+            self.global_system_status.setText(text.replace("ГОТОВО", "СИСТЕМА ГОТОВА"))
         self.animate_appearance(
             self.state_label,
             duration=200,
@@ -4591,12 +4781,18 @@ class MainWindow(QMainWindow):
             event.accept()
             return
         if (
+            (self.workers or self.turbo_workers)
+            and
             self.tray_check.isChecked()
             and self.continue_in_tray_check.isChecked()
             and QSystemTrayIcon.isSystemTrayAvailable()
         ):
+            self.close_when_idle = True
             self.hide()
-            self.notify(APP_NAME, "Приложение продолжает работать в фоновом режиме.")
+            self.notify(
+                APP_NAME,
+                "Передача продолжится в фоне. После завершения Neon Drive полностью закроется.",
+            )
             event.ignore()
             return
         if self.workers or self.turbo_workers:
@@ -4653,7 +4849,22 @@ def main() -> int:
         )
 
     sys.excepthook = report_unhandled
+    window_holder: dict[str, MainWindow] = {}
+
+    def dispatch(request: dict) -> dict:
+        window = window_holder.get("window")
+        if window is None:
+            return {"ok": False, "error": "Neon Drive ещё запускается"}
+        return window.handle_agent_request(request)
+
+    instance_server = InstanceServer(dispatch, app)
+    if not instance_server.listen():
+        send_request({"command": "activate"}, timeout_ms=1800)
+        return 0
+
     window = MainWindow()
+    window_holder["window"] = window
+    window._instance_server = instance_server
     if "--smoke-test" in sys.argv:
         QTimer.singleShot(900, app.quit)
     elif window.should_restore_maximized:

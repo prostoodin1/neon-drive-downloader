@@ -1,12 +1,12 @@
 #ifndef MyAppVersion
-  #define MyAppVersion "5.4.0-beta.12"
+  #define MyAppVersion "5.4.0-beta.13"
 #endif
 
 #ifndef MyAppFileVersion
-  #define MyAppFileVersion "5.4.0.12"
+  #define MyAppFileVersion "5.4.0.13"
 #endif
 
-#define MyAppName "Neon Drive Downloader"
+#define MyAppName "Neon Drive"
 #define MyAppExeName "NeonDriveDownloader.exe"
 
 [Setup]
@@ -22,7 +22,7 @@ DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
 PrivilegesRequired=lowest
 OutputDir=dist
-OutputBaseFilename=NeonDriveDownloader-Setup
+OutputBaseFilename=NeonDrive-Setup
 SetupIconFile=assets\neon-drive-v2.ico
 UninstallDisplayIcon={app}\{#MyAppExeName}
 Compression=lzma2/ultra64
@@ -34,7 +34,7 @@ ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 VersionInfoVersion={#MyAppFileVersion}
 VersionInfoProductName={#MyAppName}
-VersionInfoDescription=Reliable Google Drive background downloader
+VersionInfoDescription=Fast and reliable transfers for Explorer-connected drives
 
 [Languages]
 Name: "russian"; MessagesFile: "compiler:Languages\Russian.isl"
@@ -48,6 +48,10 @@ Source: "dist\NeonDriveDownloader\*"; DestDir: "{app}"; Flags: ignoreversion rec
 [Icons]
 Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
+
+[Registry]
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\App Paths\NeonDriveCLI.exe"; ValueType: string; ValueName: ""; ValueData: "{app}\NeonDriveCLI.exe"; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\App Paths\NeonDriveCLI.exe"; ValueType: string; ValueName: "Path"; ValueData: "{app}"; Flags: uninsdeletevalue
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "Запустить {#MyAppName}"; Flags: nowait postinstall skipifsilent

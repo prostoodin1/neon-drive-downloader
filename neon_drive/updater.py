@@ -18,7 +18,7 @@ from . import __version__
 
 
 REPOSITORY = "prostoodin1/neon-drive-downloader"
-SETUP_ASSET_NAME = "NeonDriveDownloader-Setup.exe"
+SETUP_ASSET_NAME = "NeonDrive-Setup.exe"
 LEGACY_ASSET_NAME = "NeonDriveDownloader.exe"
 ASSET_NAMES = (SETUP_ASSET_NAME, LEGACY_ASSET_NAME)
 API_URL = f"https://api.github.com/repos/{REPOSITORY}/releases/latest"
@@ -285,7 +285,7 @@ def launch_replacement(downloaded: Path, current_executable: Path) -> None:
             install_dir = (
                 Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
                 / "Programs"
-                / "Neon Drive Downloader"
+                / "Neon Drive"
             )
         script = downloaded.parent / "apply-setup-update.ps1"
         script.write_text(

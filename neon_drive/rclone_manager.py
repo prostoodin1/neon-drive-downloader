@@ -5,6 +5,7 @@ import io
 import json
 import os
 import re
+import sys
 import time
 import urllib.request
 import zipfile
@@ -16,7 +17,7 @@ DOWNLOADS_ROOT = "https://downloads.rclone.org"
 VERSION_URL = f"{DOWNLOADS_ROOT}/version.txt"
 MAX_TEXT_BYTES = 256 * 1024
 MAX_ARCHIVE_BYTES = 100 * 1024 * 1024
-MAX_EXECUTABLE_BYTES = 80 * 1024 * 1024
+MAX_EXECUTABLE_BYTES = 140 * 1024 * 1024
 ProgressCallback = Callable[[int, str], None]
 
 
@@ -45,6 +46,29 @@ def rclone_install_directory() -> Path:
         return Path(override).expanduser()
     base = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
     return base / "NeonDriveDownloader" / "tools" / "rclone"
+
+
+def bundled_rclone_directory() -> Path:
+    """Return the read-only Rclone payload shipped inside Neon Drive beta.13."""
+    frozen_root = getattr(sys, "_MEIPASS", None)
+    if frozen_root:
+        return Path(frozen_root) / "tools"
+    return Path(__file__).resolve().parents[1] / "vendor" / "rclone"
+
+
+def bundled_rclone_path() -> Path | None:
+    path = bundled_rclone_directory() / "rclone.exe"
+    return path if path.is_file() else None
+
+
+def bundled_rclone_version() -> str | None:
+    metadata = bundled_rclone_directory() / "install.json"
+    try:
+        data = json.loads(metadata.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    version = str(data.get("version") or "") if isinstance(data, dict) else ""
+    return version or None
 
 
 def installed_rclone_path() -> Path | None:

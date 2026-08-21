@@ -27,17 +27,12 @@ jobs:
       - name: Test progress parser
         run: python -m unittest discover -s tests
 
-      - name: Build installed and compatibility applications
+      - name: Download and verify bundled Rclone
+        run: python scripts/fetch_rclone.py
+
+      - name: Build Neon Drive and hidden agent CLI
         run: |
           python -m PyInstaller --noconfirm --clean NeonDriveDownloader.spec
-          python -m PyInstaller --noconfirm --clean NeonDriveDownloader-OneFile.spec
-
-      - name: Package portable ZIP
-        shell: pwsh
-        run: |
-          Copy-Item "dist\NeonDriveDownloader-Legacy.exe" "dist\NeonDriveDownloader.exe" -Force
-          Compress-Archive -Path "dist\NeonDriveDownloader\*" `
-            -DestinationPath "dist\NeonDriveDownloader-Portable.zip" -CompressionLevel Optimal
 
       - name: Build installer without onefile extraction
         shell: pwsh
@@ -58,9 +53,7 @@ jobs:
         shell: pwsh
         run: |
           $files = @(
-            "dist\NeonDriveDownloader-Setup.exe",
-            "dist\NeonDriveDownloader-Portable.zip",
-            "dist\NeonDriveDownloader.exe"
+            "dist\NeonDrive-Setup.exe"
           )
           foreach($path in $files) {
             $file = Get-Item $path
@@ -76,10 +69,8 @@ jobs:
           $tag = "${{ github.ref_name }}"
           $arguments = @(
             "release", "create", $tag,
-            "dist\NeonDriveDownloader-Setup.exe",
-            "dist\NeonDriveDownloader-Portable.zip",
-            "dist\NeonDriveDownloader.exe",
-            "--title", "Neon Drive Downloader $tag",
+            "dist\NeonDrive-Setup.exe",
+            "--title", "Neon Drive $tag",
             "--generate-notes"
           )
           if ($tag.Contains("-")) { $arguments += "--prerelease" }

@@ -6,17 +6,10 @@ $python = if (Test-Path ".venv\Scripts\python.exe") { ".venv\Scripts\python.exe"
 if ($LASTEXITCODE -ne 0) { throw "Dependency installation failed." }
 & $python -m unittest discover -s tests
 if ($LASTEXITCODE -ne 0) { throw "Tests failed." }
+& $python scripts\fetch_rclone.py
+if ($LASTEXITCODE -ne 0) { throw "Bundled Rclone preparation failed." }
 & $python -m PyInstaller --noconfirm --clean "NeonDriveDownloader.spec"
 if ($LASTEXITCODE -ne 0) { throw "PyInstaller build failed." }
-
-& $python -m PyInstaller --noconfirm --clean "NeonDriveDownloader-OneFile.spec"
-if ($LASTEXITCODE -ne 0) { throw "Legacy onefile build failed." }
-Copy-Item -LiteralPath "dist\NeonDriveDownloader-Legacy.exe" `
-    -Destination "dist\NeonDriveDownloader.exe" -Force
-
-$portable = "dist\NeonDriveDownloader-Portable.zip"
-if (Test-Path -LiteralPath $portable) { Remove-Item -LiteralPath $portable -Force }
-Compress-Archive -Path "dist\NeonDriveDownloader\*" -DestinationPath $portable -CompressionLevel Optimal
 
 $version = & $python -c "from neon_drive import __version__; print(__version__)"
 $versionParts = @(
@@ -40,6 +33,5 @@ if ($iscc) {
 }
 
 Write-Host "Built app: dist\NeonDriveDownloader\NeonDriveDownloader.exe"
-Write-Host "Built portable archive: $portable"
-Write-Host "Built compatibility EXE: dist\NeonDriveDownloader.exe"
-if ($iscc) { Write-Host "Built installer: dist\NeonDriveDownloader-Setup.exe" }
+Write-Host "Built hidden agent CLI: dist\NeonDriveDownloader\NeonDriveCLI.exe"
+if ($iscc) { Write-Host "Built universal installer: dist\NeonDrive-Setup.exe" }

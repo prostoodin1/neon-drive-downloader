@@ -4,9 +4,12 @@
 a = Analysis(
     ['main.py'],
     pathex=[],
-    binaries=[],
-    datas=[('assets/neon-drive-v2.png', 'assets')],
-    hiddenimports=[],
+    binaries=[('vendor/rclone/rclone.exe', 'tools')],
+    datas=[
+        ('assets/neon-drive-v2.png', 'assets'),
+        ('vendor/rclone/install.json', 'tools'),
+    ],
+    hiddenimports=['PySide6.QtNetwork'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
@@ -36,10 +39,47 @@ exe = EXE(
     icon=['assets/neon-drive-v2.ico'],
 )
 
+cli = Analysis(
+    ['cli_main.py'],
+    pathex=[],
+    binaries=[],
+    datas=[],
+    hiddenimports=['PySide6.QtNetwork'],
+    hookspath=[],
+    hooksconfig={},
+    runtime_hooks=[],
+    excludes=[],
+    noarchive=False,
+    optimize=0,
+)
+cli_pyz = PYZ(cli.pure)
+cli_exe = EXE(
+    cli_pyz,
+    cli.scripts,
+    [],
+    exclude_binaries=True,
+    name='NeonDriveCLI',
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    upx=False,
+    upx_exclude=[],
+    console=True,
+    disable_windowed_traceback=False,
+    argv_emulation=False,
+    target_arch=None,
+    codesign_identity=None,
+    entitlements_file=None,
+    icon=['assets/neon-drive-v2.ico'],
+)
+
 coll = COLLECT(
     exe,
+    cli_exe,
     a.binaries,
     a.datas,
+    cli.binaries,
+    cli.datas,
     strip=False,
     upx=False,
     upx_exclude=[],

@@ -1,5 +1,19 @@
 # Changelog
 
+## 5.4.0-beta.13
+
+- Renamed the product to Neon Drive and made the light theme the default for new installs.
+- Moved Settings behind a compact bottom gear beside the persistent system status.
+- Added shared Slow, Optimal, and Maximum presets for downloads and uploads.
+- Added a hidden JSON CLI for AI agents without exposing it as an application tab.
+- Enforced a single Neon Drive instance and reused its local IPC endpoint for CLI commands.
+- Bundled the official SHA-256-verified Rclone inside the universal installer and added
+  a safe reinstall action that removes only orphaned Neon-managed Rclone processes.
+- Closed background Neon Drive and Rclone after the final transfer when the window had
+  been closed with background continuation enabled.
+- Stopped publishing portable ZIP and legacy onefile packages; releases now contain only
+  the universal Setup executable.
+
 ## 5.4.0-beta.12
 
 - Added a background system diagnostics card to Settings with a one-click

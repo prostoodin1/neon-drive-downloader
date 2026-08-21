@@ -1,3 +1,3 @@
-"""Neon Drive Downloader."""
+"""Neon Drive."""
 
-__version__ = "5.4.0-beta.12"
+__version__ = "5.4.0-beta.13"
