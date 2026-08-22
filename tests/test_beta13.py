@@ -73,6 +73,23 @@ class Beta13Tests(unittest.TestCase):
         window.force_exit = True
         window.close()
 
+    def test_google_drive_theme_and_transfer_counter_are_available(self) -> None:
+        window = MainWindow()
+        window.notifications_check.setChecked(False)
+        drive_theme = window.theme_combo.findData("google_drive")
+
+        self.assertGreaterEqual(drive_theme, 0)
+        window.theme_combo.setCurrentIndex(drive_theme)
+        window.record_transfer_statistics(2 * 1024**3, "download")
+
+        self.assertEqual(window.theme_combo.currentData(), "google_drive")
+        self.assertIn("#1a73e8", self.app.styleSheet())
+        self.assertIn("2.0 ГБ", window.sidebar_transfer_stats.text())
+        self.assertIn("2.0 ГБ", window.transfer_stats_summary.text())
+        self.assertIn("Скачивание: 2.0 ГБ", window.transfer_stats_details.text())
+        window.force_exit = True
+        window.close()
+
     def test_agent_cli_is_json_request_not_a_gui_tab(self) -> None:
         args = build_parser().parse_args(
             [

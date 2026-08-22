@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import tempfile
 import unittest
+import urllib.error
 from pathlib import Path
 from unittest.mock import patch
 
@@ -26,6 +27,15 @@ def release_payload(tag: str, assets: list[str], prerelease: bool = False) -> di
 
 
 class UpdaterTests(unittest.TestCase):
+    def test_public_release_lookup_never_requires_github_login(self) -> None:
+        with patch.object(
+            updater,
+            "_public_json",
+            side_effect=urllib.error.URLError("offline"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "Вход в GitHub.*не требуются"):
+                updater._release_data()
+
     def test_last_downloaded_release_is_kept_in_single_cache(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

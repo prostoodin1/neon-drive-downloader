@@ -1,5 +1,17 @@
 # Changelog
 
+## 5.5.0-beta.3
+
+- Added a persistent successful-transfer counter with total, download, and upload
+  volumes plus the number of days in the current statistics period.
+- Added manual counter reset and optional automatic reset when a new month begins.
+- Added a muted light Google Drive theme with contextual blue, green, yellow, and
+  red controls while retaining Dark, Light, and OLED themes.
+- Made release discovery and installer downloads use the public GitHub API and
+  direct public asset URLs exclusively; GitHub login and GitHub CLI are not required.
+- Made the transfer counter visible on Home and in the sidebar system card, with
+  detailed controls in Settings.
+
 ## 5.5.0-beta.2
 
 - Rebuilt the application around the requested dark Neon dashboard with a

@@ -101,6 +101,7 @@ from .rclone_manager import (
 )
 from .single_instance import InstanceServer, send_request
 from .system_health import SystemHealthReport, run_system_health_check
+from .transfer_stats import TransferStats
 from .updater import (
     REPOSITORY,
     SETUP_ASSET_NAME,
@@ -1181,6 +1182,7 @@ class MainWindow(QMainWindow):
             )
         # Keep the beta.12 settings namespace so upgrades retain every preference.
         self.settings = QSettings("NeonTools", SETTINGS_APP_NAME)
+        self.transfer_stats = TransferStats(self.settings)
         self.queue: deque[str] = deque()
         self.workers: dict[str, Downloader | RcloneDownloader | TurboFileDownloader] = {}
         self.turbo_workers: set[TurboFileDownloader] = set()
@@ -1385,6 +1387,8 @@ class MainWindow(QMainWindow):
         self.global_system_status.setObjectName("systemState")
         self.global_rclone_status = QLabel("Rclone · встроен")
         self.global_rclone_status.setObjectName("footerInfo")
+        self.sidebar_transfer_stats = QLabel("Передано 0.0 Б · за 1 день")
+        self.sidebar_transfer_stats.setObjectName("transferStats")
         self.settings_gear_button = QPushButton("⚙  Настройки")
         self.settings_gear_button.setObjectName("settingsGear")
         self.settings_gear_button.setMinimumHeight(42)
@@ -1397,6 +1401,7 @@ class MainWindow(QMainWindow):
         status_layout.setContentsMargins(12, 11, 12, 11)
         status_layout.addWidget(self.global_system_status)
         status_layout.addWidget(self.global_rclone_status)
+        status_layout.addWidget(self.sidebar_transfer_stats)
         system_bar.addWidget(status_card)
         sidebar_layout.addLayout(system_bar)
 
@@ -1713,6 +1718,10 @@ class MainWindow(QMainWindow):
         status_layout.addLayout(performance_header)
         speed_graph = SpeedGraph()
         status_layout.addWidget(speed_graph)
+        transfer_stats_label = QLabel("Передано 0.0 Б · за 1 день")
+        transfer_stats_label.setObjectName("transferStats")
+        transfer_stats_label.setWordWrap(True)
+        status_layout.addWidget(transfer_stats_label)
         ring_row = QHBoxLayout()
         ring = Ring()
         ring_row.addWidget(ring)
@@ -1783,6 +1792,7 @@ class MainWindow(QMainWindow):
         )
         self.transfer_panels[direction] = panel
         panel.speed_graph = speed_graph
+        panel.transfer_stats_label = transfer_stats_label
         preset_combo.currentIndexChanged.connect(
             lambda _index, selected=preset_combo: self.apply_transfer_preset(
                 str(selected.currentData() or "optimal")
@@ -2331,8 +2341,8 @@ class MainWindow(QMainWindow):
 
         sections = self.card()
         sections.setObjectName("settingsSectionsCard")
-        sections.setMinimumWidth(230)
-        sections.setMaximumWidth(270)
+        sections.setMinimumWidth(190)
+        sections.setMaximumWidth(230)
         sections_layout = QVBoxLayout(sections)
         sections_layout.setContentsMargins(16, 16, 16, 16)
         sections_layout.setSpacing(7)
@@ -2421,6 +2431,35 @@ class MainWindow(QMainWindow):
         health_box.addWidget(self.system_health_summary)
         grid.addWidget(health_card, 0, 0, 1, 2)
 
+        stats_card, stats_box = self.settings_section("СТАТИСТИКА ПЕРЕДАЧ")
+        self.transfer_stats_summary = QLabel("Передано 0.0 Б · за 1 день")
+        self.transfer_stats_summary.setObjectName("transferStatsValue")
+        self.transfer_stats_summary.setWordWrap(True)
+        stats_box.addWidget(self.transfer_stats_summary)
+        self.transfer_stats_details = QLabel(
+            "Скачивание: 0.0 Б · Выгрузка: 0.0 Б"
+        )
+        self.transfer_stats_details.setObjectName("settingDescription")
+        self.transfer_stats_details.setWordWrap(True)
+        stats_box.addWidget(self.transfer_stats_details)
+        self.monthly_stats_reset_check = self.add_setting_toggle(
+            stats_box, "Автоматически сбрасывать счётчик при наступлении нового месяца"
+        )
+        reset_stats_row = QHBoxLayout()
+        reset_stats_row.addStretch()
+        self.reset_transfer_stats_button = QPushButton("СБРОСИТЬ СЧЁТЧИК")
+        self.reset_transfer_stats_button.setObjectName("danger")
+        self.reset_transfer_stats_button.clicked.connect(self.reset_transfer_statistics)
+        reset_stats_row.addWidget(self.reset_transfer_stats_button)
+        stats_box.addLayout(reset_stats_row)
+        stats_note = QLabel(
+            "Учитываются только успешно завершённые файлы. Ручной сброс начинает новый период сразу."
+        )
+        stats_note.setObjectName("settingDescription")
+        stats_note.setWordWrap(True)
+        stats_box.addWidget(stats_note)
+        grid.addWidget(stats_card, 1, 0, 1, 2)
+
         mode_card, mode_box = self.settings_section("ПРОСТОЙ И РАСШИРЕННЫЙ РЕЖИМ")
         mode_note = QLabel(
             "В простом режиме скрыты терминал и технические параметры. Включите Advanced mode, "
@@ -2469,12 +2508,13 @@ class MainWindow(QMainWindow):
         memory_note.setObjectName("settingDescription")
         memory_note.setWordWrap(True)
         mode_box.addWidget(memory_note)
-        grid.addWidget(mode_card, 1, 0, 1, 2)
+        grid.addWidget(mode_card, 2, 0, 1, 2)
 
         theme_card, theme_box = self.settings_section("ТЕМА ПРИЛОЖЕНИЯ")
         theme_box.addWidget(QLabel("Основная тема"))
         self.theme_combo = QComboBox()
         self.theme_combo.addItem("Светлая тема", "light")
+        self.theme_combo.addItem("Google Drive · приглушённая", "google_drive")
         self.theme_combo.addItem("Тёмная тема", "dark")
         self.theme_combo.addItem("Чёрный OLED", "oled")
         theme_box.addWidget(self.theme_combo)
@@ -2494,7 +2534,7 @@ class MainWindow(QMainWindow):
         self.accent_all_buttons_check = self.add_setting_toggle(
             theme_box, "Красить выбранным цветом все основные кнопки"
         )
-        grid.addWidget(theme_card, 2, 0)
+        grid.addWidget(theme_card, 3, 0)
 
         design_card, design_box = self.settings_section("РЕЖИМ ДИЗАЙНА")
         design_box.addWidget(QLabel("Плотность и форма интерфейса"))
@@ -2510,7 +2550,7 @@ class MainWindow(QMainWindow):
         self.design_mode_note.setObjectName("settingDescription")
         self.design_mode_note.setWordWrap(True)
         design_box.addWidget(self.design_mode_note)
-        grid.addWidget(design_card, 2, 1)
+        grid.addWidget(design_card, 3, 1)
 
         motion_card, motion_box = self.settings_section("ПЛАВНОСТЬ И АНИМАЦИИ")
         self.animations_check = self.add_setting_toggle(
@@ -2523,11 +2563,11 @@ class MainWindow(QMainWindow):
         motion_note.setObjectName("settingDescription")
         motion_note.setWordWrap(True)
         motion_box.addWidget(motion_note)
-        grid.addWidget(motion_card, 3, 0, 1, 2)
+        grid.addWidget(motion_card, 4, 0, 1, 2)
 
         grid.setColumnStretch(0, 1)
         grid.setColumnStretch(1, 1)
-        grid.setRowStretch(3, 1)
+        grid.setRowStretch(4, 1)
         layout.addWidget(self.settings_scroll(grid), 1)
         return page
 
@@ -2901,6 +2941,57 @@ class MainWindow(QMainWindow):
         if 0 <= index < len(self.file_display_radios):
             self.file_display_radios[index].setChecked(True)
 
+    @staticmethod
+    def day_count_text(days: int) -> str:
+        value = max(1, int(days))
+        if value % 10 == 1 and value % 100 != 11:
+            word = "день"
+        elif value % 10 in (2, 3, 4) and value % 100 not in (12, 13, 14):
+            word = "дня"
+        else:
+            word = "дней"
+        return f"{value} {word}"
+
+    def refresh_transfer_stats_ui(self) -> None:
+        snapshot = self.transfer_stats.snapshot()
+        period = self.day_count_text(snapshot.period_days)
+        summary = f"Передано {human_size(snapshot.total_bytes)} · за {period}"
+        details = (
+            f"Скачивание: {human_size(snapshot.download_bytes)} · "
+            f"Выгрузка: {human_size(snapshot.upload_bytes)}"
+        )
+        if hasattr(self, "sidebar_transfer_stats"):
+            self.sidebar_transfer_stats.setText(summary)
+            self.sidebar_transfer_stats.setToolTip(details)
+        if hasattr(self, "transfer_stats_summary"):
+            self.transfer_stats_summary.setText(summary)
+        if hasattr(self, "transfer_stats_details"):
+            self.transfer_stats_details.setText(details)
+        for panel in self.transfer_panels.values():
+            label = getattr(panel, "transfer_stats_label", None)
+            if label is not None:
+                label.setText(summary)
+                label.setToolTip(details)
+
+    def record_transfer_statistics(self, byte_count: int, direction: str) -> None:
+        self.transfer_stats.record(byte_count, direction)
+        self.refresh_transfer_stats_ui()
+
+    def reset_transfer_statistics(self) -> None:
+        answer = QMessageBox.question(
+            self,
+            APP_NAME,
+            "Сбросить объём скачиваний и выгрузок и начать новый период?",
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self.transfer_stats.reset()
+        self.refresh_transfer_stats_ui()
+
+    def set_monthly_transfer_stats_reset(self, enabled: bool) -> None:
+        self.transfer_stats.set_auto_monthly_reset(enabled)
+        self.refresh_transfer_stats_ui()
+
     def apply_theme(self) -> None:
         theme = self.theme_combo.currentData() if hasattr(self, "theme_combo") else "light"
         design = (
@@ -2958,8 +3049,16 @@ class MainWindow(QMainWindow):
                 "border": "#cdd8de",
                 "button": "#e6edf1", "track": "#d9e3e8", "terminal": "#101820",
             },
+            "google_drive": {
+                "background": "#eef1f4", "card": "#f8fafd", "input": "#f1f4f8",
+                "text": "#202124", "muted": "#5f6368", "disabled": "#9aa0a6",
+                "border": "#d2d8e0",
+                "button": "#e8f0fe", "track": "#dde3ea", "terminal": "#202124",
+            },
         }
         colors = themes.get(str(theme), themes["light"])
+        drive_theme = str(theme) == "google_drive"
+        light_theme = str(theme) in ("light", "google_drive")
         root_background = (
             f"qlineargradient(x1:0, y1:0, x2:1, y2:1, "
             f"stop:0 {colors['background']}, stop:1 {colors['input']})"
@@ -2979,17 +3078,26 @@ class MainWindow(QMainWindow):
             self.design_mode_note.setText(notes.get(str(design), notes["compact"]))
         selected_accent = self.accent_combo.currentData() if hasattr(self, "accent_combo") else "#00e8f5"
         accent = getattr(self, "accent_color", None) or str(selected_accent or "#00e8f5")
+        if drive_theme:
+            accent = "#1a73e8"
         accent_color = QColor(accent)
         if not accent_color.isValid():
             accent_color = QColor("#00e8f5")
         accent = accent_color.name()
         accent_hover = accent_color.lighter(122).name()
         accent_text = "#081012" if accent_color.lightness() > 145 else "#ffffff"
-        green = "#42d56b" if theme != "light" else "#16843a"
+        green = "#42d56b" if not light_theme else "#188038"
         terminal_text = accent_color.lighter(135).name()
         all_buttons = bool(
             hasattr(self, "accent_all_buttons_check") and self.accent_all_buttons_check.isChecked()
+        ) and not drive_theme
+        sidebar_background = colors["card"] if light_theme else "#08131f"
+        selected_surface = (
+            "#d2e3fc" if drive_theme else
+            accent_color.lighter(185).name() if light_theme else
+            accent_color.darker(310).name()
         )
+        selected_text = "#174ea6" if drive_theme else colors["text"]
         general_button = (
             f"background: {accent}; color: {accent_text}; border-color: {accent_hover};"
             if all_buttons else
@@ -2998,7 +3106,7 @@ class MainWindow(QMainWindow):
         stylesheet = f"""
             * {{ font-family: 'Segoe UI Variable', 'Segoe UI'; color: {colors['text']}; }}
             #root {{ background: {root_background}; }}
-            #dashboardSidebar {{ background: #08131f; border: 1px solid {colors['border']}; border-radius: 22px; }}
+            #dashboardSidebar {{ background: {sidebar_background}; border: 1px solid {colors['border']}; border-radius: 22px; }}
             #sidebarLogo {{ background: {accent}; color: {accent_text}; border-radius: 20px; font-size: 19px; font-weight: 900; }}
             #sidebarBrand {{ color: {colors['text']}; font-size: 19px; font-weight: 850; }}
             #sidebarVersion {{ color: {colors['muted']}; font-size: 10px; }}
@@ -3009,11 +3117,11 @@ class MainWindow(QMainWindow):
             #newTransferButton {{ background: {accent}; color: {accent_text}; border-color: {accent}; text-align: center; font-weight: 800; }}
             #sidebarNavButton, #settingsGear {{ background: transparent; color: {colors['muted']}; border-color: transparent; text-align: left; padding-left: 13px; }}
             #sidebarNavButton:hover, #settingsGear:hover {{ background: {colors['button']}; color: {colors['text']}; border-color: {colors['border']}; }}
-            #sidebarNavButton:checked, #settingsGear:checked {{ background: {accent_color.darker(310).name()}; color: {colors['text']}; border-color: {accent}; }}
+            #sidebarNavButton:checked, #settingsGear:checked {{ background: {selected_surface}; color: {selected_text}; border-color: {accent}; }}
             #sidebarStatusCard {{ background: {colors['card']}; border: 1px solid {colors['border']}; border-radius: 15px; }}
             #settingsSectionsCard {{ background: {colors['card']}; border: 1px solid {colors['border']}; border-radius: {metrics['card_radius']}px; }}
             #settingsSectionButton {{ background: transparent; color: {colors['muted']}; border-color: transparent; text-align: left; padding: 10px 12px; }}
-            #settingsSectionButton:checked {{ background: {accent_color.darker(310).name()}; color: {colors['text']}; border-color: {accent}; }}
+            #settingsSectionButton:checked {{ background: {selected_surface}; color: {selected_text}; border-color: {accent}; }}
             QDialog, QMessageBox {{ background-color: {colors['background']}; }}
             QMessageBox QLabel {{ color: {colors['text']}; font-size: 13px; min-width: 270px; }}
             QMessageBox QPushButton {{ min-width: 78px; }}
@@ -3028,6 +3136,8 @@ class MainWindow(QMainWindow):
             #transferSubtitle {{ color: {colors['muted']}; font-size: 11px; padding-top: 1px; }}
             #state {{ color: {accent}; background: {colors['card']}; border: 1px solid {accent}; border-radius: {metrics['radius'] + 4}px; padding: {metrics['button_v']}px {metrics['button_h'] + 1}px; }}
             #footerInfo {{ color: {colors['muted']}; }}
+            #transferStats {{ color: {colors['muted']}; font-size: 10px; font-weight: 650; }}
+            #transferStatsValue {{ color: {accent}; font-size: {metrics['section'] + 3}px; font-weight: 800; }}
             #systemState {{ color: {green}; font-size: 11px; font-weight: 750; }}
             #card, #fileRow, #filesCard, #terminalCard, #statusCard, #profileCard, #directionSwitch, #recentCard {{ background: {colors['card']}; border: 1px solid {colors['border']}; border-radius: {metrics['card_radius']}px; }}
             #heroCard {{ background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 {colors['card']}, stop:1 {colors['input']}); border: 1px solid {accent_color.darker(170).name()}; border-radius: {metrics['card_radius'] + 2}px; }}
@@ -3109,6 +3219,29 @@ class MainWindow(QMainWindow):
             QScrollBar:vertical {{ background: transparent; width: 8px; }}
             QScrollBar::handle:vertical {{ background: {colors['border']}; border-radius: 4px; min-height: 30px; }}
         """
+        if drive_theme:
+            stylesheet += """
+                #newTransferButton, QPushButton#primary {
+                    background: #1a73e8; color: #ffffff; border-color: #1a73e8;
+                }
+                #newTransferButton:hover, QPushButton#primary:hover {
+                    background: #185abc; color: #ffffff; border-color: #185abc;
+                }
+                QPushButton#primarySmall, QPushButton#updateButton {
+                    background: #34a853; color: #ffffff; border-color: #2d9148;
+                }
+                QPushButton#primarySmall:hover, QPushButton#updateButton:hover {
+                    background: #2d9148; color: #ffffff; border-color: #188038;
+                }
+                QPushButton#danger { background: #fce8e6; color: #c5221f; border-color: #ea4335; }
+                QPushButton#danger:hover { background: #ea4335; color: #ffffff; border-color: #c5221f; }
+                #settingsGear:checked { background: #fef7e0; color: #b06000; border-color: #f9ab00; }
+                #headerReadyBadge { color: #188038; border-color: #34a853; }
+                #systemState, #fileStatus { color: #188038; }
+                #profileCard QPushButton[selected="true"] {
+                    background: #1a73e8; color: #ffffff; border-color: #185abc;
+                }
+            """
         application = QApplication.instance()
         if application is not None:
             if application.styleSheet() != stylesheet:
@@ -3227,6 +3360,9 @@ class MainWindow(QMainWindow):
             self.settings.value("accent_all_buttons", False, type=bool)
         )
         self.animations_check.setChecked(self.settings.value("animations", True, type=bool))
+        self.monthly_stats_reset_check.setChecked(
+            self.transfer_stats.auto_monthly_reset_enabled()
+        )
         select(self.update_mode_combo, self.settings.value(
             "update_mode",
             "automatic" if self.settings.value("auto_updates", True, type=bool) else "manual",
@@ -3287,6 +3423,7 @@ class MainWindow(QMainWindow):
             self.accent_combo.currentIndexChanged,
             self.accent_all_buttons_check.stateChanged,
             self.animations_check.stateChanged,
+            self.monthly_stats_reset_check.stateChanged,
             self.update_mode_combo.currentIndexChanged,
             self.tray_check.stateChanged,
             self.continue_in_tray_check.stateChanged,
@@ -3306,6 +3443,7 @@ class MainWindow(QMainWindow):
         )
         self.update_settings_visibility()
         self.apply_theme()
+        self.refresh_transfer_stats_ui()
         self.apply_window_size_mode()
         self.refresh_file_rows("download")
         self.refresh_file_rows("upload")
@@ -3407,6 +3545,10 @@ class MainWindow(QMainWindow):
                     self.download_mode_combo.setCurrentIndex(sequential)
         if sender is self.accent_combo:
             self.accent_color = str(self.accent_combo.currentData())
+        if sender is self.monthly_stats_reset_check:
+            self.set_monthly_transfer_stats_reset(
+                self.monthly_stats_reset_check.isChecked()
+            )
         if sender is self.navigation_mode_combo:
             mode = str(self.navigation_mode_combo.currentData() or "side")
             self.sidebar_expanded = mode != "side_compact"
@@ -3608,6 +3750,7 @@ class MainWindow(QMainWindow):
         self.sidebar_brand.setVisible(expanded)
         self.sidebar_version.setVisible(expanded)
         self.global_rclone_status.setVisible(expanded)
+        self.sidebar_transfer_stats.setVisible(expanded)
         self.new_transfer_button.setText("＋ Новая передача" if expanded else "＋")
         self.settings_gear_button.setText("⚙  Настройки" if expanded else "⚙")
         for _page, icon, label in self.sidebar_button_specs:
@@ -4854,6 +4997,7 @@ class MainWindow(QMainWindow):
                 task.fraction = 1.0
                 task.status = "ГОТОВО"
                 self.completed_items += 1
+                self.record_transfer_statistics(task.size, self.active_transfer)
                 self.append_log(f"✓ Завершено: {source}\n")
             else:
                 task.status = "ОШИБКА" if not self.stopping else "ОСТАНОВЛЕНО"

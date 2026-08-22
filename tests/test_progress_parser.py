@@ -197,6 +197,7 @@ class StopAfterCurrentFileTests(unittest.TestCase):
         self.assertFalse(window.running)
         self.assertEqual(window.completed_items, 1)
         self.assertEqual(window.failed_items, 0)
+        self.assertEqual(window.transfer_stats.snapshot().total_bytes, 100)
         window.force_exit = True
         window.close()
 

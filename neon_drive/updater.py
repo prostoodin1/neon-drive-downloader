@@ -55,18 +55,6 @@ def running_onefile() -> bool:
     return bool(getattr(sys, "frozen", False) and bundle_dir.name.upper().startswith("_MEI"))
 
 
-def gh_path() -> str | None:
-    found = shutil.which("gh")
-    if found:
-        return found
-    candidates = (
-        Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "GitHub CLI" / "gh.exe",
-        Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "GitHub CLI" / "gh.exe",
-        Path(os.environ.get("LOCALAPPDATA", "")) / "Microsoft" / "WinGet" / "Links" / "gh.exe",
-    )
-    return next((str(path) for path in candidates if path.is_file()), None)
-
-
 def _public_json(url: str) -> object:
     request = urllib.request.Request(
         url,
@@ -77,38 +65,20 @@ def _public_json(url: str) -> object:
     return data
 
 
-def _private_json(endpoint: str) -> object:
-    executable = gh_path()
-    if not executable:
-        raise RuntimeError(
-            "Приватный репозиторий требует GitHub CLI. Установите gh и выполните gh auth login."
-        )
-    result = subprocess.run(
-        [executable, "api", endpoint],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        timeout=20,
-        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-    )
-    if result.returncode != 0:
-        message = result.stderr.strip() or result.stdout.strip() or "GitHub API недоступен"
-        raise RuntimeError(message)
-    return json.loads(result.stdout)
-
-
 def _release_data(latest: bool = True) -> tuple[object, str]:
     url = API_URL if latest else RELEASES_URL
-    endpoint = (
-        f"repos/{REPOSITORY}/releases/latest"
-        if latest
-        else f"repos/{REPOSITORY}/releases?per_page=100"
-    )
     try:
         return _public_json(url), "public"
-    except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, json.JSONDecodeError):
-        return _private_json(endpoint), "gh"
+    except (
+        urllib.error.HTTPError,
+        urllib.error.URLError,
+        TimeoutError,
+        json.JSONDecodeError,
+    ) as exc:
+        raise RuntimeError(
+            "Публичный список версий GitHub временно недоступен. "
+            "Вход в GitHub и GitHub CLI для установки Neon Drive не требуются."
+        ) from exc
 
 
 def _normalize_release(data: dict, method: str) -> dict:
@@ -202,40 +172,15 @@ def download_release(release: dict) -> Path:
     staging_dir.mkdir(parents=True, exist_ok=True)
     staged = staging_dir / asset_name
     staged.unlink(missing_ok=True)
-    if release.get("method") == "gh":
-        executable = gh_path()
-        if not executable:
-            raise RuntimeError("GitHub CLI больше не доступен.")
-        result = subprocess.run(
-            [
-                executable,
-                "release",
-                "download",
-                release["tag"],
-                "--repo",
-                REPOSITORY,
-                "--pattern",
-                asset_name,
-                "--dir",
-                str(staging_dir),
-                "--clobber",
-            ],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=600,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-        )
-        if result.returncode != 0:
-            raise RuntimeError(result.stderr.strip() or "Не удалось скачать Release через GitHub CLI.")
-    else:
-        request = urllib.request.Request(
-            release["asset_url"],
-            headers={"User-Agent": "NeonDriveDownloader"},
-        )
-        with urllib.request.urlopen(request, timeout=60) as response, staged.open("wb") as stream:
-            shutil.copyfileobj(response, stream)
+    asset_url = str(release.get("asset_url") or "")
+    if not asset_url.startswith("https://"):
+        raise RuntimeError("У выбранной версии отсутствует публичная ссылка на установщик.")
+    request = urllib.request.Request(
+        asset_url,
+        headers={"User-Agent": "NeonDriveDownloader"},
+    )
+    with urllib.request.urlopen(request, timeout=60) as response, staged.open("wb") as stream:
+        shutil.copyfileobj(response, stream)
     if not staged.is_file() or staged.stat().st_size < 1_000_000:
         raise RuntimeError("Загруженный файл обновления отсутствует или повреждён.")
     cache_dir = update_dir / LAST_DOWNLOAD_DIRECTORY
