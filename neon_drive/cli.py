@@ -44,6 +44,10 @@ def request_from_args(args: argparse.Namespace) -> dict:
 
 
 def main(argv: list[str] | None = None) -> int:
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            reconfigure(encoding="utf-8", errors="replace")
     app = QCoreApplication.instance() or QCoreApplication(sys.argv[:1])
     _ = app
     args = build_parser().parse_args(argv)
@@ -54,4 +58,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

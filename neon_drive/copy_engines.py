@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -25,6 +26,24 @@ class RcloneOptions:
     checksum: bool = False
     local_no_sparse: bool = True
     local_no_preallocate: bool = True
+    config_path: str | None = None
+
+
+def is_rclone_remote_path(value: str | Path) -> bool:
+    text = str(value).strip()
+    if re.match(r"^[A-Za-z]:[\\/]", text):
+        return False
+    return bool(re.match(r"^[A-Za-z0-9_.-]+:", text))
+
+
+def rclone_target_path(source: str | Path, destination: str | Path) -> str | Path:
+    source_path = Path(source)
+    name = source_path.name or source_path.drive.rstrip(":\\/") or "drive"
+    if is_rclone_remote_path(destination):
+        base = str(destination).strip().rstrip("/\\")
+        separator = "" if base.endswith(":") else "/"
+        return f"{base}{separator}{name}"
+    return Path(destination) / name
 
 
 def copy_engine_for_source(mode: str, source: str | Path) -> str:
@@ -38,13 +57,13 @@ def copy_engine_for_source(mode: str, source: str | Path) -> str:
 
 def rclone_arguments(
     source: str,
-    destination: Path,
+    destination: str | Path,
     options: RcloneOptions | None = None,
-) -> tuple[list[str], Path]:
+) -> tuple[list[str], str | Path]:
     """Build an rclone command for an Explorer path or configured remote path."""
     selected = options or RcloneOptions()
     source_path = Path(source)
-    target = destination / (source_path.name or source_path.drive.rstrip(":\\/") or "drive")
+    target = rclone_target_path(source_path, destination)
     command = "copy" if source_path.is_dir() else "copyto"
     args = [
         command,
@@ -73,4 +92,6 @@ def rclone_arguments(
         args.append("--local-no-sparse")
     if selected.local_no_preallocate:
         args.append("--local-no-preallocate")
+    if selected.config_path:
+        args.append(f"--config={selected.config_path}")
     return args, target

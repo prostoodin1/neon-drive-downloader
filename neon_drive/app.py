@@ -90,7 +90,17 @@ from .copy_engines import (
     COPY_ENGINE_NAMES,
     RcloneOptions,
     copy_engine_for_source,
+    is_rclone_remote_path,
+    rclone_target_path,
     rclone_arguments,
+)
+from .google_drive import (
+    GOOGLE_DRIVE_ROOT,
+    disconnect_google_drive,
+    extract_authorize_token,
+    google_drive_connected,
+    managed_rclone_config_path,
+    store_google_drive_token,
 )
 from .rclone_manager import (
     bundled_rclone_path,
@@ -218,14 +228,14 @@ def resource_path(name: str) -> Path:
     return base / name
 
 
-def copy_target_path(source: str | Path, destination: Path) -> Path:
-    path = Path(source)
-    target_name = path.name or path.drive.rstrip(":\\/") or "drive"
-    return destination / target_name
+def copy_target_path(source: str | Path, destination: str | Path) -> str | Path:
+    return rclone_target_path(source, destination)
 
 
-def destination_collisions(sources: list[str], destination: Path) -> dict[Path, list[str]]:
-    targets: dict[str, tuple[Path, list[str]]] = {}
+def destination_collisions(
+    sources: list[str], destination: str | Path
+) -> dict[str | Path, list[str]]:
+    targets: dict[str, tuple[str | Path, list[str]]] = {}
     for source in sources:
         target = copy_target_path(source, destination)
         key = os.path.normcase(os.path.normpath(str(target)))
@@ -686,7 +696,7 @@ class RcloneDownloader(QProcess):
         self.errorOccurred.connect(self._process_error)
         self.buffer = ""
         self.current = ""
-        self.expected_target: Path | None = None
+        self.expected_target: str | Path | None = None
         self.expected_bytes = 0
         self._done_emitted = False
         self._user_stopped = False
@@ -697,7 +707,7 @@ class RcloneDownloader(QProcess):
         self,
         executable: str,
         source: str,
-        destination: Path,
+        destination: str | Path,
         options: RcloneOptions,
         expected_bytes: int = 0,
     ) -> None:
@@ -880,7 +890,7 @@ class FileRow(QFrame):
     def __init__(
         self,
         source: str,
-        destination: Path,
+        destination: str | Path,
         compact: bool = False,
         display_mode: str = "list",
         animations_enabled: bool = True,
@@ -938,7 +948,7 @@ class FileRow(QFrame):
         )
         layout.addWidget(self.info)
 
-    def target_path(self) -> Path:
+    def target_path(self) -> str | Path:
         return copy_target_path(self.source, self.destination)
 
     @staticmethod
@@ -953,7 +963,12 @@ class FileRow(QFrame):
 
     def open_destination(self) -> None:
         target = self.target_path()
-        self.reveal(target if target.exists() else self.destination)
+        if is_rclone_remote_path(target):
+            QDesktopServices.openUrl(QUrl("https://drive.google.com/drive/my-drive"))
+            return
+        target_path = Path(target)
+        destination_path = Path(self.destination)
+        self.reveal(target_path if target_path.exists() else destination_path)
 
     def update_data(
         self,
@@ -978,7 +993,7 @@ class FileRow(QFrame):
 
 
 class FilesOverviewRow(QFrame):
-    def __init__(self, direction: str, source: str, destination: Path) -> None:
+    def __init__(self, direction: str, source: str, destination: str | Path) -> None:
         super().__init__(objectName="fileRow")
         self.direction = direction
         self.source = source
@@ -1027,12 +1042,17 @@ class FilesOverviewRow(QFrame):
         self.destination_button.clicked.connect(self.open_destination)
         layout.addWidget(self.destination_button)
 
-    def target_path(self) -> Path:
+    def target_path(self) -> str | Path:
         return copy_target_path(self.source, self.destination)
 
     def open_destination(self) -> None:
         target = self.target_path()
-        FileRow.reveal(target if target.exists() else self.destination)
+        if is_rclone_remote_path(target):
+            QDesktopServices.openUrl(QUrl("https://drive.google.com/drive/my-drive"))
+            return
+        target_path = Path(target)
+        destination_path = Path(self.destination)
+        FileRow.reveal(target_path if target_path.exists() else destination_path)
 
     def update_data(self, size: int, downloaded: int, speed: float, state: str) -> None:
         transferred = min(downloaded, size) if size else downloaded
@@ -1129,6 +1149,59 @@ class RcloneInstallThread(QThread):
         self.succeeded.emit(str(path), version)
 
 
+class GoogleDriveOAuthThread(QThread):
+    progress = Signal(str)
+    succeeded = Signal(str)
+    failed = Signal(str)
+
+    def __init__(self, executable: str, parent=None) -> None:
+        super().__init__(parent)
+        self.executable = executable
+        self.process: subprocess.Popen[str] | None = None
+
+    def run(self) -> None:
+        self.progress.emit("Откройте браузер и подтвердите доступ к Google Drive…")
+        startupinfo = None
+        creationflags = 0
+        if os.name == "nt":
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            creationflags = subprocess.CREATE_NO_WINDOW
+        try:
+            self.process = subprocess.Popen(
+                [self.executable, "authorize", "drive"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                startupinfo=startupinfo,
+                creationflags=creationflags,
+            )
+            output, _ = self.process.communicate(timeout=600)
+            if self.process.returncode != 0:
+                raise RuntimeError(
+                    "Авторизация отменена или Google не выдал разрешение. Попробуйте ещё раз."
+                )
+            token = extract_authorize_token(output)
+            path = store_google_drive_token(token)
+        except subprocess.TimeoutExpired:
+            if self.process is not None:
+                self.process.kill()
+            self.failed.emit("Время ожидания подтверждения Google истекло.")
+            return
+        except Exception as exc:
+            self.failed.emit(str(exc))
+            return
+        finally:
+            self.process = None
+        self.succeeded.emit(str(path))
+
+    def stop(self) -> None:
+        if self.process is not None and self.process.poll() is None:
+            self.process.terminate()
+
+
 class SystemHealthThread(QThread):
     progress = Signal(int, str)
     succeeded = Signal(object)
@@ -1214,6 +1287,7 @@ class MainWindow(QMainWindow):
         self.release_history: list[dict] = []
         self.addon_install_thread: AddonInstallThread | None = None
         self.rclone_install_thread: RcloneInstallThread | None = None
+        self.google_drive_oauth_thread: GoogleDriveOAuthThread | None = None
         self.system_health_thread: SystemHealthThread | None = None
         self.robocopy_executable = "robocopy.exe"
         self.rclone_executable = "rclone.exe"
@@ -1621,7 +1695,13 @@ class MainWindow(QMainWindow):
         show_destination_button.clicked.connect(
             lambda _checked=False, selected=direction: self.open_destination_folder_for(selected)
         )
+        google_drive_button = QPushButton("Google Drive")
+        google_drive_button.setObjectName("primarySmall")
+        google_drive_button.setToolTip("Подключить Google Drive напрямую через OAuth2")
+        google_drive_button.setVisible(upload)
+        google_drive_button.clicked.connect(self.use_or_connect_google_drive)
         destination_row.addWidget(destination, 1)
+        destination_row.addWidget(google_drive_button)
         destination_row.addWidget(browse_button)
         destination_row.addWidget(show_destination_button)
 
@@ -1791,6 +1871,7 @@ class MainWindow(QMainWindow):
             footer_info=footer_info,
         )
         self.transfer_panels[direction] = panel
+        panel.google_drive_button = google_drive_button
         panel.speed_graph = speed_graph
         panel.transfer_stats_label = transfer_stats_label
         preset_combo.currentIndexChanged.connect(
@@ -2099,6 +2180,37 @@ class MainWindow(QMainWindow):
         self.rclone_install_progress.setFormat("Подготовка загрузки Rclone…")
         self.rclone_install_progress.setVisible(False)
         speed_box.addWidget(self.rclone_install_progress)
+        google_card = QFrame(objectName="oauthCard")
+        google_box = QVBoxLayout(google_card)
+        google_box.setContentsMargins(13, 11, 13, 11)
+        google_box.setSpacing(7)
+        google_title_row = QHBoxLayout()
+        google_title_row.addWidget(
+            QLabel("GOOGLE DRIVE · ПРЯМОЕ ПОДКЛЮЧЕНИЕ", objectName="sectionTitle")
+        )
+        google_title_row.addStretch()
+        self.google_drive_status = QLabel("Не подключён", objectName="engineStatus")
+        google_title_row.addWidget(self.google_drive_status)
+        google_box.addLayout(google_title_row)
+        google_note = QLabel(
+            "OAuth2 открывает страницу согласия Google. После подтверждения Neon выгружает "
+            "через Rclone прямо в облако — приложение Google Drive для компьютера не участвует."
+        )
+        google_note.setObjectName("settingDescription")
+        google_note.setWordWrap(True)
+        google_box.addWidget(google_note)
+        google_actions = QHBoxLayout()
+        self.google_drive_connect_button = QPushButton("Подключить Google Drive")
+        self.google_drive_connect_button.setObjectName("primarySmall")
+        self.google_drive_connect_button.clicked.connect(self.start_google_drive_oauth)
+        self.google_drive_disconnect_button = QPushButton("Отключить")
+        self.google_drive_disconnect_button.setObjectName("danger")
+        self.google_drive_disconnect_button.clicked.connect(self.disconnect_google_drive_account)
+        google_actions.addWidget(self.google_drive_connect_button)
+        google_actions.addWidget(self.google_drive_disconnect_button)
+        google_actions.addStretch()
+        google_box.addLayout(google_actions)
+        speed_box.addWidget(google_card)
         engine_note = QLabel(
             "Совместный режим безопасно распределяет элементы очереди между двумя движками: "
             "Rclone получает отдельные файлы, Robocopy — папки. Один файл никогда не копируется "
@@ -3447,6 +3559,7 @@ class MainWindow(QMainWindow):
         self.apply_window_size_mode()
         self.refresh_file_rows("download")
         self.refresh_file_rows("upload")
+        self.refresh_google_drive_status()
         self.show_settings_section(str(self.settings.value("settings_section", "rclone")))
         self.restore_active_tab()
         self.settings.setValue("dashboard_reference_migrated", True)
@@ -3929,6 +4042,109 @@ class MainWindow(QMainWindow):
         self.rclone_install_thread = None
         self.refresh_engine_status()
 
+    def refresh_google_drive_status(self) -> None:
+        if not hasattr(self, "google_drive_status"):
+            return
+        connected = google_drive_connected()
+        self.google_drive_status.setText("● Подключён" if connected else "Не подключён")
+        self.google_drive_status.setProperty("ready", connected)
+        self.google_drive_status.style().unpolish(self.google_drive_status)
+        self.google_drive_status.style().polish(self.google_drive_status)
+        busy = self.google_drive_oauth_thread is not None
+        self.google_drive_connect_button.setEnabled(not busy)
+        self.google_drive_connect_button.setText(
+            "Переподключить Google Drive" if connected else "Подключить Google Drive"
+        )
+        self.google_drive_disconnect_button.setEnabled(connected and not busy)
+        upload_button = getattr(self.transfer_panels.get("upload"), "google_drive_button", None)
+        if upload_button is not None:
+            upload_button.setText("Google Drive ✓" if connected else "Google Drive")
+
+    def use_or_connect_google_drive(self) -> None:
+        if not google_drive_connected():
+            self.start_google_drive_oauth()
+            return
+        self.upload_destination.setText(GOOGLE_DRIVE_ROOT)
+        rclone_index = self.copy_engine_combo.findData("rclone")
+        if rclone_index >= 0:
+            self.copy_engine_combo.setCurrentIndex(rclone_index)
+        self.settings.setValue("upload_destination", GOOGLE_DRIVE_ROOT)
+        self.settings.setValue("copy_engine", "rclone")
+        self.refresh_file_rows("upload")
+
+    def start_google_drive_oauth(self) -> None:
+        if self.google_drive_oauth_thread is not None:
+            return
+        if self.running:
+            QMessageBox.warning(self, APP_NAME, "Дождитесь завершения текущей передачи.")
+            return
+        executable = self.resolved_rclone_executable()
+        if not executable:
+            QMessageBox.critical(
+                self,
+                APP_NAME,
+                "Встроенный Rclone не найден. Сначала нажмите «Переустановить Rclone».",
+            )
+            return
+        thread = GoogleDriveOAuthThread(executable, self)
+        self.google_drive_oauth_thread = thread
+        thread.progress.connect(self.google_drive_oauth_progressed)
+        thread.succeeded.connect(self.google_drive_oauth_succeeded)
+        thread.failed.connect(self.google_drive_oauth_failed)
+        thread.finished.connect(self.google_drive_oauth_finished)
+        self.google_drive_status.setText("Ожидание Google…")
+        self.google_drive_connect_button.setEnabled(False)
+        thread.start()
+
+    @Slot(str)
+    def google_drive_oauth_progressed(self, message: str) -> None:
+        self.google_drive_status.setText("Ожидание подтверждения…")
+        self.append_log(f"Google Drive OAuth2: {message}\n")
+
+    @Slot(str)
+    def google_drive_oauth_succeeded(self, _config_path: str) -> None:
+        self.upload_destination.setText(GOOGLE_DRIVE_ROOT)
+        rclone_index = self.copy_engine_combo.findData("rclone")
+        if rclone_index >= 0:
+            self.copy_engine_combo.setCurrentIndex(rclone_index)
+        self.settings.setValue("upload_destination", GOOGLE_DRIVE_ROOT)
+        self.settings.setValue("copy_engine", "rclone")
+        self.settings.sync()
+        self.append_log("Google Drive OAuth2: аккаунт подключён напрямую к Neon.\n")
+        QMessageBox.information(
+            self,
+            APP_NAME,
+            "Google Drive подключён. Теперь Neon будет выгружать файлы напрямую через Rclone.",
+        )
+
+    @Slot(str)
+    def google_drive_oauth_failed(self, message: str) -> None:
+        self.append_log(f"Google Drive OAuth2: авторизация не завершена — {message}\n")
+        QMessageBox.critical(self, APP_NAME, f"Не удалось подключить Google Drive:\n{message}")
+
+    @Slot()
+    def google_drive_oauth_finished(self) -> None:
+        self.google_drive_oauth_thread = None
+        self.refresh_google_drive_status()
+
+    def disconnect_google_drive_account(self) -> None:
+        if self.running:
+            QMessageBox.warning(self, APP_NAME, "Дождитесь завершения текущей передачи.")
+            return
+        answer = QMessageBox.question(
+            self,
+            APP_NAME,
+            "Отключить Google Drive от Neon? Файлы в облаке останутся на месте.",
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        disconnect_google_drive()
+        if is_rclone_remote_path(self.upload_destination.text()):
+            self.upload_destination.clear()
+            self.settings.setValue("upload_destination", "")
+        self.refresh_google_drive_status()
+        self.append_log("Google Drive OAuth2: подключение удалено.\n")
+
     def _stop_orphaned_rclone_processes(self) -> int:
         """Stop only stale Rclone processes that belong to this Neon installation."""
         candidates = {
@@ -4110,6 +4326,7 @@ class MainWindow(QMainWindow):
         self.engine_status.style().polish(self.engine_status)
 
     def selected_rclone_options(self) -> RcloneOptions:
+        managed_config = managed_rclone_config_path()
         return RcloneOptions(
             chunk_size_mib=int(self.rclone_chunk_combo.currentData() or 64),
             multi_thread_cutoff_mib=int(self.rclone_cutoff_combo.currentData() or 256),
@@ -4124,6 +4341,7 @@ class MainWindow(QMainWindow):
             low_level_retries=int(self.rclone_low_retries_combo.currentData() or 10),
             checksum=self.rclone_checksum_check.isChecked(),
             local_no_sparse=self.rclone_no_sparse_check.isChecked(),
+            config_path=str(managed_config) if managed_config.is_file() else None,
         )
 
     def choose_accent_color(self) -> None:
@@ -4342,6 +4560,9 @@ class MainWindow(QMainWindow):
             if not self.choose_destination_for(direction):
                 return
             text = panel.destination.text().strip()
+        if is_rclone_remote_path(text):
+            QDesktopServices.openUrl(QUrl("https://drive.google.com/drive/my-drive"))
+            return
         folder = Path(text).expanduser()
         try:
             folder.mkdir(parents=True, exist_ok=True)
@@ -4416,7 +4637,12 @@ class MainWindow(QMainWindow):
         panel = self.transfer_panels[direction]
         items = [line.strip() for line in panel.sources.toPlainText().splitlines() if line.strip()]
         fallback = Path.home() / "Downloads" if direction == "download" else Path.home()
-        destination = Path(panel.destination.text().strip() or fallback)
+        destination_text = panel.destination.text().strip()
+        destination: str | Path = (
+            destination_text
+            if is_rclone_remote_path(destination_text)
+            else Path(destination_text or fallback)
+        )
         mode = str(self.file_display_combo.currentData() or "list")
         mode_names = {
             "list": "ПОДРОБНЫЙ СПИСОК",
@@ -4471,7 +4697,12 @@ class MainWindow(QMainWindow):
                 if line.strip()
             ]
             fallback = Path.home() / "Downloads" if direction == "download" else Path.home()
-            destination = Path(panel.destination.text().strip() or fallback)
+            destination_text = panel.destination.text().strip()
+            destination: str | Path = (
+                destination_text
+                if is_rclone_remote_path(destination_text)
+                else Path(destination_text or fallback)
+            )
             for source in sources:
                 task = (
                     self.tasks.get(source)
@@ -4548,6 +4779,7 @@ class MainWindow(QMainWindow):
                     panel.choose_folder_button,
                     panel.clear_button,
                     panel.browse_button,
+                    getattr(panel, "google_drive_button", panel.browse_button),
                 ]
             )
         for widget in (
@@ -4601,9 +4833,34 @@ class MainWindow(QMainWindow):
         if not panel.destination.text().strip():
             if not self.choose_destination_for(direction):
                 return
-        destination = Path(panel.destination.text().strip()).expanduser()
-        if direction == "upload":
-            requirement = upload_destination_requirement(destination)
+        destination_text = panel.destination.text().strip()
+        remote_destination = direction == "upload" and is_rclone_remote_path(destination_text)
+        if remote_destination:
+            if not destination_text.startswith(GOOGLE_DRIVE_ROOT):
+                QMessageBox.critical(
+                    self,
+                    APP_NAME,
+                    "Этот облачный путь не принадлежит управляемому подключению Neon. "
+                    "Нажмите кнопку «Google Drive» рядом с полем назначения.",
+                )
+                return
+            if not google_drive_connected():
+                QMessageBox.warning(
+                    self,
+                    APP_NAME,
+                    "Google Drive ещё не подключён. Нажмите кнопку «Google Drive» и "
+                    "подтвердите доступ в браузере.",
+                )
+                return
+            destination: str | Path = destination_text
+            storage_summary = "Облачное хранилище · свободное место определяет Google Drive"
+            rclone_index = self.copy_engine_combo.findData("rclone")
+            if rclone_index >= 0:
+                self.copy_engine_combo.setCurrentIndex(rclone_index)
+        else:
+            destination = Path(destination_text).expanduser()
+        if direction == "upload" and not remote_destination:
+            requirement = upload_destination_requirement(Path(destination))
             if requirement:
                 QMessageBox.critical(self, APP_NAME, requirement)
                 return
@@ -4624,16 +4881,18 @@ class MainWindow(QMainWindow):
                 + "\n\n".join(details),
             )
             return
-        try:
-            destination.mkdir(parents=True, exist_ok=True)
-            usage = shutil.disk_usage(destination)
-        except OSError as exc:
-            QMessageBox.critical(self, APP_NAME, f"Не удалось подготовить папку назначения:\n{exc}")
-            return
-        write_problem = destination_write_problem(destination)
-        if write_problem:
-            QMessageBox.critical(self, APP_NAME, write_problem)
-            return
+        if not remote_destination:
+            try:
+                Path(destination).mkdir(parents=True, exist_ok=True)
+                usage = shutil.disk_usage(destination)
+            except OSError as exc:
+                QMessageBox.critical(self, APP_NAME, f"Не удалось подготовить папку назначения:\n{exc}")
+                return
+            write_problem = destination_write_problem(Path(destination))
+            if write_problem:
+                QMessageBox.critical(self, APP_NAME, write_problem)
+                return
+            storage_summary = f"Свободно: {human_size(usage.free)} из {human_size(usage.total)}"
         engine_mode = str(self.copy_engine_combo.currentData() or "robocopy")
         required_engines = {copy_engine_for_source(engine_mode, item) for item in items}
         robocopy = shutil.which("robocopy.exe") if "robocopy" in required_engines else None
@@ -4737,12 +4996,12 @@ class MainWindow(QMainWindow):
             f"потоков {rclone_options.multi_thread_streams} · "
             f"передач {rclone_options.transfers}\n"
             f"Очередь: {len(items)}\nОбщий объём: {human_size(self.total_bytes)}\n"
-            f"Назначение: {destination}\nСвободно: {human_size(usage.free)} из {human_size(usage.total)}\n"
+            f"Назначение: {destination}\n{storage_summary}\n"
             f"Лог: {self.log_path}\n"
         )
         self.fill_worker_slots()
 
-    def rebuild_task_rows(self, destination: Path) -> None:
+    def rebuild_task_rows(self, destination: str | Path) -> None:
         panel = self.current_transfer_panel()
         self.clear_file_rows(self.active_transfer)
         mode = str(self.file_display_combo.currentData() or "list")
@@ -4859,10 +5118,13 @@ class MainWindow(QMainWindow):
         worker.item_done.connect(self.on_item_done)
         self.workers[source] = worker
         if isinstance(worker, RcloneDownloader):
+            destination_text = self.current_transfer_panel().destination.text()
             worker.start_item(
                 self.rclone_executable,
                 source,
-                Path(self.current_transfer_panel().destination.text()),
+                destination_text
+                if is_rclone_remote_path(destination_text)
+                else Path(destination_text),
                 self.selected_rclone_options(),
                 task.size,
             )
@@ -5465,6 +5727,14 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:  # noqa: N802
         self.persist_settings()
+        if self.google_drive_oauth_thread is not None and self.google_drive_oauth_thread.isRunning():
+            QMessageBox.information(
+                self,
+                APP_NAME,
+                "Завершите или отмените подтверждение Google Drive в браузере.",
+            )
+            event.ignore()
+            return
         if self.system_health_thread is not None and self.system_health_thread.isRunning():
             QMessageBox.information(
                 self,

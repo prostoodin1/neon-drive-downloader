@@ -1,5 +1,18 @@
 # Changelog
 
+## 5.5.0-beta.4
+
+- Added a one-click Google Drive OAuth2 connection using the bundled Rclone browser flow.
+- Added direct uploads to the managed `NeonGoogleDrive:` remote, bypassing Google Drive
+  for desktop while preserving the existing Explorer-folder workflow as an alternative.
+- Store the Google refresh token only in Neon's managed Rclone config and never print it
+  to the application terminal or session log.
+- Added connect, reconnect, disconnect, connection-status, and quick destination controls.
+- Force direct cloud transfers through one Rclone process and pass the managed config to
+  every direct upload while keeping multi-stream performance settings inside that process.
+- Added remote-path collision protection, Drive web opening, and automated OAuth/config tests.
+- Made the hidden AI CLI emit UTF-8 reliably on Windows consoles.
+
 ## 5.5.0-beta.3
 
 - Added a persistent successful-transfer counter with total, download, and upload

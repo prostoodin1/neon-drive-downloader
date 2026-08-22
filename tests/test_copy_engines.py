@@ -7,6 +7,7 @@ from pathlib import Path
 from neon_drive.copy_engines import (
     RcloneOptions,
     copy_engine_for_source,
+    is_rclone_remote_path,
     rclone_arguments,
 )
 
@@ -54,6 +55,24 @@ class CopyEngineTests(unittest.TestCase):
             self.assertEqual(args[0], "copy")
             self.assertEqual(target, destination / "folder")
             self.assertIn("--create-empty-src-dirs", args)
+
+    def test_rclone_upload_targets_managed_remote_and_config(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir) / "movie.mkv"
+            source.write_bytes(b"neon")
+            config = Path(temp_dir) / "rclone.conf"
+
+            args, target = rclone_arguments(
+                str(source),
+                "NeonGoogleDrive:Projects",
+                RcloneOptions(config_path=str(config)),
+            )
+
+            self.assertEqual(target, "NeonGoogleDrive:Projects/movie.mkv")
+            self.assertEqual(args[2], target)
+            self.assertIn(f"--config={config}", args)
+            self.assertTrue(is_rclone_remote_path("NeonGoogleDrive:"))
+            self.assertFalse(is_rclone_remote_path(r"C:\Downloads"))
 
     def test_hybrid_never_assigns_two_engines_to_one_source(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
