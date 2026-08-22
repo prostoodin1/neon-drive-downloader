@@ -1,5 +1,18 @@
 # Changelog
 
+## 5.5.0-beta.2
+
+- Rebuilt the application around the requested dark Neon dashboard with a
+  permanent left sidebar, compact status header, and system state card.
+- Combined download and upload setup on Home with source, destination, preset,
+  current transfers, live performance, and recent results in one view.
+- Redesigned Templates as three detailed Slow, Optimal, and Maximum profile cards.
+- Moved advanced configuration into a two-column Settings hub with section navigation.
+- Added automatic workspace-aware sizing, 900x640, 1180x760, and 1380x880 presets,
+  and responsive sidebar collapse so controls remain visible without maximizing.
+- Added a dark/light theme switch to Neon Drive Installer and automatic graceful
+  app shutdown before replacing an installed version.
+
 ## 5.5.0-beta.1
 
 - Added a separate `NeonDriveInstaller.exe` version manager that lists GitHub

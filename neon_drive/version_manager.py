@@ -7,8 +7,8 @@ import sys
 from pathlib import Path
 
 import psutil
-from PySide6.QtCore import QTimer, QUrl
-from PySide6.QtGui import QDesktopServices, QIcon
+from PySide6.QtCore import QSettings, QTimer, QUrl
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QApplication,
     QFrame,
@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
 )
 
 from . import __version__
+from .single_instance import send_request
 from .updater import (
     LEGACY_ASSET_NAME,
     REPOSITORY,
@@ -55,14 +56,37 @@ def installed_details() -> tuple[str, Path]:
         return "не установлена", default
 
 
-def main_app_running() -> bool:
+def main_app_processes() -> list[psutil.Process]:
+    processes: list[psutil.Process] = []
     for process in psutil.process_iter(("name",)):
         try:
             if str(process.info.get("name") or "").casefold() == "neondrivedownloader.exe":
-                return True
+                processes.append(process)
         except psutil.Error:
             continue
-    return False
+    return processes
+
+
+def main_app_running() -> bool:
+    return bool(main_app_processes())
+
+
+def close_main_app() -> None:
+    processes = main_app_processes()
+    if not processes:
+        return
+    send_request({"command": "shutdown", "reason": "version-install"}, timeout_ms=3000)
+    _gone, alive = psutil.wait_procs(processes, timeout=5)
+    for process in alive:
+        try:
+            process.terminate()
+        except psutil.NoSuchProcess:
+            continue
+        except psutil.Error as exc:
+            raise RuntimeError(f"Не удалось закрыть Neon Drive: {exc}") from exc
+    _gone, alive = psutil.wait_procs(alive, timeout=5)
+    if alive:
+        raise RuntimeError("Neon Drive не завершился. Закройте приложение вручную.")
 
 
 class VersionManagerWindow(QMainWindow):
@@ -71,6 +95,8 @@ class VersionManagerWindow(QMainWindow):
         self.releases: list[dict] = []
         self.history_thread: ReleaseHistoryThread | None = None
         self.download_thread: UpdateDownloadThread | None = None
+        self.settings = QSettings("NeonTools", "Neon Drive Installer")
+        self.dark_mode = self.settings.value("dark_mode", False, type=bool)
         self.installed_version, self.install_directory = installed_details()
         self.setWindowTitle("Neon Drive Installer")
         self.setMinimumSize(900, 620)
@@ -153,31 +179,71 @@ class VersionManagerWindow(QMainWindow):
         self.status = QLabel("Получение списка версий…", objectName="muted")
         footer.addWidget(self.status)
         footer.addStretch()
+        self.theme_button = QPushButton()
+        self.theme_button.clicked.connect(self.toggle_theme)
+        footer.addWidget(self.theme_button)
         footer.addWidget(QLabel(f"Installer для Neon Drive {__version__}", objectName="muted"))
         outer.addLayout(footer)
 
     def _apply_style(self) -> None:
+        if self.dark_mode:
+            colors = {
+                "root": "#08131f",
+                "card": "#101e2d",
+                "input": "#0b1724",
+                "text": "#eaf2fa",
+                "muted": "#91a5b8",
+                "border": "#263a4e",
+                "button": "#17273a",
+                "disabled": "#62768a",
+                "selection": "#123d49",
+            }
+            self.theme_button.setText("☀  Светлый фон")
+        else:
+            colors = {
+                "root": "#f3f6f9",
+                "card": "#ffffff",
+                "input": "#f8fafc",
+                "text": "#17212b",
+                "muted": "#657585",
+                "border": "#d9e2ea",
+                "button": "#edf2f6",
+                "disabled": "#9aa7b2",
+                "selection": "#dff9fa",
+            }
+            self.theme_button.setText("☾  Тёмный фон")
         self.setStyleSheet(
-            """
-            * { font-family: 'Segoe UI Variable', 'Segoe UI'; color: #17212b; }
-            #root { background: #f3f6f9; }
-            #title { font-size: 28px; font-weight: 750; color: #101820; }
-            #muted { color: #657585; }
-            #badge { background: #e6fbfc; color: #087f86; border: 1px solid #36cbd2; border-radius: 14px; padding: 7px 12px; font-weight: 650; }
-            #card { background: #ffffff; border: 1px solid #d9e2ea; border-radius: 18px; }
-            #sectionTitle { font-size: 14px; font-weight: 700; padding: 4px 0; }
-            #releaseTitle { font-size: 23px; font-weight: 750; color: #101820; }
-            QListWidget, QTextBrowser { background: #f8fafc; border: 1px solid #dce5ec; border-radius: 12px; padding: 6px; }
-            QListWidget::item { padding: 11px 10px; margin: 2px; border-radius: 9px; }
-            QListWidget::item:selected { background: #dff9fa; color: #087f86; }
-            QPushButton { background: #edf2f6; border: 1px solid #d3dde5; border-radius: 10px; padding: 8px 13px; font-weight: 650; }
-            QPushButton:hover { border-color: #22c8cf; color: #087f86; }
-            QPushButton#primary { background: #24d1d8; border-color: #24d1d8; color: #07161a; padding: 9px 17px; }
-            QPushButton:disabled { color: #9aa7b2; background: #eef2f5; }
-            QProgressBar { border: 1px solid #d3dde5; border-radius: 7px; background: #edf2f6; min-height: 12px; }
-            QProgressBar::chunk { background: #24d1d8; border-radius: 6px; }
+            f"""
+            * {{ font-family: 'Segoe UI Variable', 'Segoe UI'; color: {colors['text']}; }}
+            #root {{ background: {colors['root']}; }}
+            #title {{ font-size: 28px; font-weight: 750; color: {colors['text']}; }}
+            #muted {{ color: {colors['muted']}; }}
+            #badge {{ background: #e6fbfc; color: #087f86; border: 1px solid #36cbd2; border-radius: 14px; padding: 7px 12px; font-weight: 650; }}
+            #card {{ background: {colors['card']}; border: 1px solid {colors['border']}; border-radius: 18px; }}
+            #sectionTitle {{ font-size: 14px; font-weight: 700; padding: 4px 0; }}
+            #releaseTitle {{ font-size: 23px; font-weight: 750; color: {colors['text']}; }}
+            QListWidget, QTextBrowser {{ background: {colors['input']}; color: {colors['text']}; border: 1px solid {colors['border']}; border-radius: 12px; padding: 6px; }}
+            QListWidget::item {{ padding: 11px 10px; margin: 2px; border-radius: 9px; }}
+            QListWidget::item:selected {{ background: {colors['selection']}; color: #22c8cf; }}
+            QPushButton {{ background: {colors['button']}; border: 1px solid {colors['border']}; border-radius: 10px; padding: 8px 13px; font-weight: 650; }}
+            QPushButton:hover {{ border-color: #22c8cf; color: #087f86; }}
+            QPushButton#primary {{ background: #24d1d8; border-color: #24d1d8; color: #07161a; padding: 9px 17px; }}
+            QPushButton:disabled {{ color: {colors['disabled']}; background: {colors['button']}; }}
+            QProgressBar {{ border: 1px solid {colors['border']}; border-radius: 7px; background: {colors['button']}; min-height: 12px; }}
+            QProgressBar::chunk {{ background: #24d1d8; border-radius: 6px; }}
+            QMessageBox {{ background: {colors['card']}; }}
+            QMessageBox QLabel {{ color: {colors['text']}; min-width: 280px; }}
             """
         )
+        self.release_notes.document().setDefaultStyleSheet(
+            f"body {{ color: {colors['text']}; background: {colors['input']}; }} "
+            f"a {{ color: #18bfc7; }} code {{ color: {colors['text']}; }}"
+        )
+
+    def toggle_theme(self) -> None:
+        self.dark_mode = not self.dark_mode
+        self.settings.setValue("dark_mode", self.dark_mode)
+        self._apply_style()
 
     def set_busy(self, busy: bool, text: str) -> None:
         self.refresh_button.setEnabled(not busy)
@@ -242,13 +308,6 @@ class VersionManagerWindow(QMainWindow):
         release = self.selected_release()
         if release is None or (self.download_thread and self.download_thread.isRunning()):
             return
-        if main_app_running():
-            QMessageBox.warning(
-                self,
-                "Neon Drive Installer",
-                "Закройте Neon Drive перед установкой другой версии.",
-            )
-            return
         answer = QMessageBox.question(
             self,
             "Neon Drive Installer",
@@ -257,6 +316,13 @@ class VersionManagerWindow(QMainWindow):
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
+        if main_app_running():
+            self.set_busy(True, "Закрытие запущенного Neon Drive…")
+            try:
+                close_main_app()
+            except Exception as exc:
+                self.operation_failed(str(exc))
+                return
         self.set_busy(True, f"Скачивание {release.get('tag')}…")
         thread = UpdateDownloadThread(release, self)
         self.download_thread = thread

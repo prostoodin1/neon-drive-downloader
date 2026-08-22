@@ -11,7 +11,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 os.environ.setdefault("NEON_DRIVE_DISABLE_AUTO_UPDATE", "1")
 
 from PySide6.QtCore import QSettings
-from PySide6.QtWidgets import QApplication, QLabel, QTabWidget
+from PySide6.QtWidgets import QApplication, QLabel
 
 from neon_drive.addons import UPLOAD_ADDON_FILE
 from neon_drive.app import (
@@ -370,7 +370,7 @@ class StopAfterCurrentFileTests(unittest.TestCase):
         window.force_exit = True
         window.close()
 
-    def test_advanced_mode_adds_tab_and_reveals_terminal(self) -> None:
+    def test_advanced_mode_stays_inside_settings_and_reveals_terminal(self) -> None:
         window = MainWindow()
         window.notifications_check.setChecked(False)
         window.advanced_mode_check.setChecked(False)
@@ -380,35 +380,22 @@ class StopAfterCurrentFileTests(unittest.TestCase):
 
         window.advanced_mode_check.setChecked(True)
         window.update_settings_visibility()
-        self.assertGreaterEqual(window.tabs.indexOf(window.advanced_page), 0)
+        self.assertEqual(window.tabs.indexOf(window.advanced_page), -1)
+        self.assertTrue(window.settings_page.isAncestorOf(window.advanced_page))
         self.assertFalse(window.transfer_panels["download"].terminal_card.isHidden())
 
         window.advanced_mode_check.setChecked(False)
         window.force_exit = True
         window.close()
 
-    def test_navigation_can_move_left_and_collapse_without_changing_page(self) -> None:
+    def test_dashboard_sidebar_can_collapse_without_changing_page(self) -> None:
         window = MainWindow()
         window.notifications_check.setChecked(False)
         window.animations_check.setChecked(True)
-        window.navigation_mode_combo.setCurrentIndex(
-            window.navigation_mode_combo.findData("top")
-        )
-        window.update_settings_visibility()
-        self.assertEqual(window.tabs.tabPosition(), QTabWidget.TabPosition.North)
-        self.assertTrue(window.navigation_toggle_button.isHidden())
-
-        window.navigation_mode_combo.setCurrentIndex(
-            window.navigation_mode_combo.findData("side")
-        )
         window.update_settings_visibility()
         page = window.tabs.currentWidget()
-        self.assertEqual(window.tabs.tabPosition(), QTabWidget.TabPosition.West)
+        self.assertTrue(window.tabs.tabBar().isHidden())
         self.assertFalse(window.navigation_toggle_button.isHidden())
-        self.assertGreater(
-            window.tabs.tabBar().tabSizeHint(0).width(),
-            window.tabs.tabBar().tabSizeHint(0).height(),
-        )
 
         window.files_tab_check.setChecked(True)
         window.tabs.setCurrentWidget(window.files_page)
@@ -419,15 +406,13 @@ class StopAfterCurrentFileTests(unittest.TestCase):
         page = window.tabs.currentWidget()
 
         window.set_navigation_panel_expanded(False, animate=False)
-        self.assertTrue(window.tabs.tabBar().isHidden())
+        self.assertEqual(window.sidebar.width(), 66)
         self.assertIs(window.tabs.currentWidget(), page)
         window.set_navigation_panel_expanded(True, animate=False)
-        self.assertFalse(window.tabs.tabBar().isHidden())
+        self.assertEqual(window.sidebar.width(), 220)
+        self.assertTrue(window.tabs.tabBar().isHidden())
         self.assertIs(window.tabs.currentWidget(), page)
 
-        window.navigation_mode_combo.setCurrentIndex(
-            window.navigation_mode_combo.findData("top")
-        )
         window.files_tab_check.setChecked(False)
         window.force_exit = True
         window.close()
@@ -541,7 +526,7 @@ class StopAfterCurrentFileTests(unittest.TestCase):
         restored.advanced_mode_check.setChecked(False)
         restored.files_tab_check.setChecked(False)
         restored.navigation_mode_combo.setCurrentIndex(
-            restored.navigation_mode_combo.findData("top")
+            restored.navigation_mode_combo.findData("side")
         )
         restored.window_size_combo.setCurrentIndex(
             restored.window_size_combo.findData("standard")
@@ -645,17 +630,17 @@ class StopAfterCurrentFileTests(unittest.TestCase):
         self.assertTrue(window.upload_page.isAncestorOf(upload.start_button))
         self.assertFalse(window.settings_page.isAncestorOf(download.status_card))
         self.assertFalse(window.updates_page.isAncestorOf(upload.status_card))
-        self.assertEqual(download.start_button.text(), "↓ НАЧАТЬ ЗАГРУЗКУ")
-        self.assertEqual(upload.start_button.text(), "↑ НАЧАТЬ ВЫГРУЗКУ")
+        self.assertEqual(download.start_button.text(), "Начать передачу")
+        self.assertEqual(upload.start_button.text(), "Начать передачу")
 
         window.window_size_combo.setCurrentIndex(
             window.window_size_combo.findData("small")
         )
-        self.assertEqual((window.width(), window.height()), (960, 700))
+        self.assertEqual((window.width(), window.height()), (900, 640))
         window.window_size_combo.setCurrentIndex(
             window.window_size_combo.findData("large")
         )
-        self.assertEqual((window.width(), window.height()), (1480, 980))
+        self.assertEqual((window.width(), window.height()), (1380, 880))
 
         window.window_size_combo.setCurrentIndex(
             window.window_size_combo.findData("standard")
@@ -763,7 +748,7 @@ class StopAfterCurrentFileTests(unittest.TestCase):
         window.force_exit = True
         window.close()
 
-    def test_upload_tab_uses_explorer_paths_and_robocopy_worker(self) -> None:
+    def test_home_upload_direction_uses_explorer_paths_and_robocopy_worker(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             source = root / "local-video.mkv"
@@ -773,10 +758,12 @@ class StopAfterCurrentFileTests(unittest.TestCase):
 
             window = MainWindow()
             window.notifications_check.setChecked(False)
-            window.tabs.setCurrentIndex(window.upload_tab_index)
-            self.assertEqual(window.tabs.tabText(window.upload_tab_index), "Выгрузка")
+            window.show_transfer_direction("upload")
+            self.assertEqual(window.upload_tab_index, -1)
+            self.assertIs(window.tabs.currentWidget(), window.home_page)
+            self.assertIs(window.home_transfer_stack.currentWidget(), window.upload_page)
             self.assertEqual(window.active_transfer, "upload")
-            self.assertEqual(window.start_button.text(), "↑ НАЧАТЬ ВЫГРУЗКУ")
+            self.assertEqual(window.start_button.text(), "Начать передачу")
             self.assertIn("1.0.0-beta.1", window.addon_status_badge.text())
 
             window.upload_sources.setPlainText(str(source))

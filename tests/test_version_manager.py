@@ -2,14 +2,18 @@ from __future__ import annotations
 
 import os
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 os.environ["NEON_DRIVE_DISABLE_NETWORK"] = "1"
 
 from PySide6.QtWidgets import QApplication
 
-from neon_drive.version_manager import VersionManagerWindow, main_app_running
+from neon_drive.version_manager import (
+    VersionManagerWindow,
+    close_main_app,
+    main_app_running,
+)
 
 
 class VersionManagerTests(unittest.TestCase):
@@ -47,6 +51,38 @@ class VersionManagerTests(unittest.TestCase):
         process = type("Process", (), {"info": {"name": "NeonDriveInstaller.exe"}})()
         with patch("neon_drive.version_manager.psutil.process_iter", return_value=[process]):
             self.assertFalse(main_app_running())
+
+    def test_theme_button_switches_to_dark_background(self) -> None:
+        window = VersionManagerWindow()
+        original = window.dark_mode
+
+        window.toggle_theme()
+
+        self.assertNotEqual(window.dark_mode, original)
+        expected = "Светлый фон" if window.dark_mode else "Тёмный фон"
+        self.assertIn(expected, window.theme_button.text())
+        window.close()
+
+    def test_installer_requests_graceful_main_app_shutdown(self) -> None:
+        process = MagicMock()
+        with (
+            patch(
+                "neon_drive.version_manager.main_app_processes",
+                return_value=[process],
+            ),
+            patch("neon_drive.version_manager.send_request") as request,
+            patch(
+                "neon_drive.version_manager.psutil.wait_procs",
+                return_value=([process], []),
+            ),
+        ):
+            close_main_app()
+
+        request.assert_called_once_with(
+            {"command": "shutdown", "reason": "version-install"},
+            timeout_ms=3000,
+        )
+        process.terminate.assert_not_called()
 
 
 if __name__ == "__main__":

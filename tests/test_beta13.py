@@ -39,13 +39,23 @@ class Beta13Tests(unittest.TestCase):
         settings.clear()
         settings.sync()
 
-    def test_light_theme_and_bottom_settings_gear_are_defaults(self) -> None:
+    def test_dark_dashboard_and_bottom_settings_button_are_defaults(self) -> None:
         window = MainWindow()
         window.notifications_check.setChecked(False)
-        self.assertEqual(window.theme_combo.currentData(), "light")
+        self.assertEqual(window.theme_combo.currentData(), "dark")
+        self.assertTrue(window.tabs.tabBar().isHidden())
+        self.assertFalse(window.sidebar.isHidden())
         self.assertFalse(window.tabs.isTabVisible(window.settings_tab_index))
-        self.assertNotIn("AI CLI", [window.tabs.tabText(i) for i in range(window.tabs.count())])
+        tab_names = [window.tabs.tabText(i) for i in range(window.tabs.count())]
+        self.assertNotIn("AI CLI", tab_names)
+        self.assertNotIn("Выгрузка", tab_names)
+        self.assertIn("Главная", tab_names)
+        self.assertIs(window.system_bar.itemAt(0).widget(), window.settings_gear_button)
         self.assertFalse(window.settings_gear_button.isHidden())
+        window.set_upload_addon_enabled(True)
+        window.show_transfer_direction("upload")
+        self.assertIs(window.home_transfer_stack.currentWidget(), window.upload_page)
+        self.assertIs(window.tabs.currentWidget(), window.home_page)
         window.toggle_settings_page()
         self.assertIs(window.tabs.currentWidget(), window.settings_page)
         window.force_exit = True
