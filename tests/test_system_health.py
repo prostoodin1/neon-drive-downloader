@@ -15,6 +15,26 @@ from neon_drive.system_health import (
 
 
 class SystemHealthTests(unittest.TestCase):
+    def test_direct_google_drive_destination_is_checked_without_creating_local_folder(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir, patch(
+            "neon_drive.system_health.google_drive_connected", return_value=True
+        ), patch("neon_drive.system_health.check_online") as online, patch(
+            "neon_drive.system_health.check_rclone_executable",
+            return_value=(True, "rclone v1.71.0"),
+        ):
+            online.return_value = HealthCheckItem("Интернет", "ok", "Доступен")
+            report = run_system_health_check(
+                app_root=Path(temp_dir),
+                rclone_candidate=str(Path(temp_dir) / "rclone.exe"),
+                download_destination="",
+                upload_destination="NeonGoogleDrive:",
+                sources=[],
+                repair=False,
+            )
+
+        drive = next(item for item in report.items if item.name == "Прямое подключение Google Drive")
+        self.assertEqual(drive.status, "ok")
+
     def test_probe_directory_creates_missing_folder_and_cleans_probe(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             target = Path(temp_dir) / "missing" / "logs"

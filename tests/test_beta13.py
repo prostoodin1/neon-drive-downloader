@@ -35,6 +35,13 @@ class Beta13Tests(unittest.TestCase):
         cls.settings_dir.cleanup()
 
     def setUp(self) -> None:
+        for widget in QApplication.topLevelWidgets():
+            if isinstance(widget, MainWindow):
+                widget.auto_health_timer.stop()
+                widget.force_exit = True
+                widget.close()
+                widget.deleteLater()
+        self.app.processEvents()
         settings = QSettings("NeonTools", "Neon Drive Downloader")
         settings.clear()
         settings.sync()
@@ -56,10 +63,74 @@ class Beta13Tests(unittest.TestCase):
         window.show_transfer_direction("upload")
         self.assertIs(window.home_transfer_stack.currentWidget(), window.upload_page)
         self.assertIs(window.tabs.currentWidget(), window.home_page)
+        self.assertFalse(
+            window.transfer_panels["upload"].direction_toggle_button.isHidden()
+        )
+        window.transfer_panels["upload"].direction_toggle_button.click()
+        self.assertIs(window.home_transfer_stack.currentWidget(), window.download_page)
         window.toggle_settings_page()
         self.assertIs(window.tabs.currentWidget(), window.settings_page)
         window.force_exit = True
         window.close()
+
+    def test_beta5_behavior_settings_are_persisted(self) -> None:
+        window = MainWindow()
+        window.notifications_check.setChecked(False)
+        with patch("neon_drive.app.set_startup_enabled") as set_startup:
+            window.auto_system_health_check.setChecked(True)
+            window.keep_open_after_finish_check.setChecked(True)
+            window.windows_startup_check.setChecked(True)
+            window.persist_settings()
+
+        settings = QSettings("NeonTools", "Neon Drive Downloader")
+        self.assertTrue(settings.value("auto_system_health", False, type=bool))
+        self.assertTrue(settings.value("keep_open_after_finish", False, type=bool))
+        self.assertTrue(settings.value("windows_startup", False, type=bool))
+        set_startup.assert_called_once()
+
+        window.close_when_idle = True
+        window.maybe_close_when_idle()
+        self.assertFalse(window.close_when_idle)
+        window.force_exit = True
+        window.close()
+
+    def test_automatic_health_check_starts_silently(self) -> None:
+        window = MainWindow()
+        window.notifications_check.setChecked(False)
+        window.auto_health_timer.stop()
+        window.auto_system_health_check.setChecked(True)
+
+        with patch.object(window, "start_system_health_check") as start_health:
+            window.maybe_auto_system_health_check()
+
+        start_health.assert_called_once_with(silent=True)
+        window.force_exit = True
+        window.close()
+
+    def test_manual_transfer_tuning_survives_restart_without_preset_override(self) -> None:
+        first = MainWindow()
+        first.notifications_check.setChecked(False)
+        first.copy_engine_combo.setCurrentIndex(first.copy_engine_combo.findData("rclone"))
+        first.rclone_performance_combo.setCurrentIndex(
+            first.rclone_performance_combo.findData("manual")
+        )
+        first.rclone_chunk_combo.setCurrentIndex(first.rclone_chunk_combo.findData(512))
+        self.assertGreaterEqual(first.rclone_chunk_combo.findData(2048), 0)
+        first.rclone_streams_combo.setCurrentIndex(first.rclone_streams_combo.findData(24))
+        first.rclone_checksum_check.setChecked(True)
+        first.persist_settings()
+        first.force_exit = True
+        first.close()
+
+        restored = MainWindow()
+        restored.notifications_check.setChecked(False)
+        self.assertEqual(restored.copy_engine_combo.currentData(), "rclone")
+        self.assertEqual(restored.rclone_performance_combo.currentData(), "manual")
+        self.assertEqual(restored.rclone_chunk_combo.currentData(), 512)
+        self.assertEqual(restored.rclone_streams_combo.currentData(), 24)
+        self.assertTrue(restored.rclone_checksum_check.isChecked())
+        restored.force_exit = True
+        restored.close()
 
     def test_simple_profile_configures_both_copy_engines(self) -> None:
         window = MainWindow()

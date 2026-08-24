@@ -10,6 +10,13 @@ from pathlib import Path
 GOOGLE_DRIVE_REMOTE = "NeonGoogleDrive"
 GOOGLE_DRIVE_ROOT = f"{GOOGLE_DRIVE_REMOTE}:"
 
+OAUTH_COMPLETION_TEMPLATE = """<!doctype html>
+<html lang=\"ru\"><head><meta charset=\"utf-8\"><title>Neon Drive</title>
+<style>body{font:16px system-ui;background:#f4f7fb;color:#172033;display:grid;place-items:center;height:100vh;margin:0}.card{background:white;padding:32px;border-radius:18px;box-shadow:0 12px 40px #0002;text-align:center}h1{color:#1a73e8}</style></head>
+<body><div class=\"card\"><h1>Google Drive подключён</h1><p>Можно вернуться в Neon Drive. Эта вкладка закроется автоматически.</p></div>
+<script>setTimeout(function(){window.open('','_self');window.close();},900);</script></body></html>
+"""
+
 
 def managed_rclone_config_path() -> Path:
     override = os.environ.get("NEON_DRIVE_RCLONE_CONFIG")
@@ -17,6 +24,19 @@ def managed_rclone_config_path() -> Path:
         return Path(override).expanduser()
     local_app_data = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
     return local_app_data / "NeonDriveDownloader" / "rclone" / "rclone.conf"
+
+
+def oauth_completion_template_path() -> Path:
+    path = managed_rclone_config_path().parent / "oauth-complete.html"
+    if not path.is_file() or path.read_text(encoding="utf-8") != OAUTH_COMPLETION_TEMPLATE:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_suffix(".html.download")
+        try:
+            temporary.write_text(OAUTH_COMPLETION_TEMPLATE, encoding="utf-8")
+            temporary.replace(path)
+        finally:
+            temporary.unlink(missing_ok=True)
+    return path
 
 
 def _read_config(path: Path) -> configparser.ConfigParser:

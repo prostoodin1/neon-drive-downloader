@@ -7,12 +7,13 @@ from unittest.mock import MagicMock, patch
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 os.environ["NEON_DRIVE_DISABLE_NETWORK"] = "1"
 
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QMessageBox
 
 from neon_drive.version_manager import (
     VersionManagerWindow,
     close_main_app,
     main_app_running,
+    same_version,
 )
 
 
@@ -51,6 +52,36 @@ class VersionManagerTests(unittest.TestCase):
         process = type("Process", (), {"info": {"name": "NeonDriveInstaller.exe"}})()
         with patch("neon_drive.version_manager.psutil.process_iter", return_value=[process]):
             self.assertFalse(main_app_running())
+
+    def test_beta_versions_are_compared_semantically(self) -> None:
+        self.assertTrue(same_version("v5.5.0-beta.5", "5.5.0-beta.5"))
+        self.assertFalse(same_version("5.5.0-beta.4", "5.5.0-beta.5"))
+
+    def test_uninstall_button_launches_registered_uninstaller(self) -> None:
+        uninstaller = os.path.abspath("unins000.exe")
+        with (
+            patch(
+                "neon_drive.version_manager.installed_details",
+                return_value=("5.5.0-beta.4", os.path.abspath("installed")),
+            ),
+            patch(
+                "neon_drive.version_manager.installed_uninstaller",
+                return_value=uninstaller,
+            ),
+        ):
+            window = VersionManagerWindow()
+        with (
+            patch(
+                "neon_drive.version_manager.QMessageBox.question",
+                return_value=QMessageBox.StandardButton.Yes,
+            ),
+            patch("neon_drive.version_manager.main_app_running", return_value=False),
+            patch("neon_drive.version_manager.subprocess.Popen") as popen,
+        ):
+            window.uninstall_installed()
+
+        popen.assert_called_once_with([str(uninstaller)], close_fds=True)
+        window.close()
 
     def test_theme_button_switches_to_dark_background(self) -> None:
         window = VersionManagerWindow()

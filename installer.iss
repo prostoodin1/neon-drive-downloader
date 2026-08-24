@@ -1,9 +1,9 @@
 #ifndef MyAppVersion
-  #define MyAppVersion "5.5.0-beta.4"
+  #define MyAppVersion "5.5.0-beta.5"
 #endif
 
 #ifndef MyAppFileVersion
-  #define MyAppFileVersion "5.5.0.4"
+  #define MyAppFileVersion "5.5.0.5"
 #endif
 
 #define MyAppName "Neon Drive"
@@ -57,3 +57,10 @@ Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\App Paths\NeonDri
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "Запустить {#MyAppName}"; Flags: nowait postinstall skipifsilent
+
+[Code]
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+begin
+  if CurUninstallStep = usUninstall then
+    RegDeleteValue(HKCU, 'Software\Microsoft\Windows\CurrentVersion\Run', 'Neon Drive');
+end;

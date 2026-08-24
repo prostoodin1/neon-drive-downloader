@@ -71,6 +71,7 @@ class CopyEngineTests(unittest.TestCase):
             self.assertEqual(target, "NeonGoogleDrive:Projects/movie.mkv")
             self.assertEqual(args[2], target)
             self.assertIn(f"--config={config}", args)
+            self.assertIn("--drive-chunk-size=64Mi", args)
             self.assertTrue(is_rclone_remote_path("NeonGoogleDrive:"))
             self.assertFalse(is_rclone_remote_path(r"C:\Downloads"))
 

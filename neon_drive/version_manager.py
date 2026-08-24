@@ -33,27 +33,67 @@ from .updater import (
     SETUP_ASSET_NAMES,
     ReleaseHistoryThread,
     UpdateDownloadThread,
+    version_tuple,
 )
 
 
 APP_ID = "{E6B76B7F-32F0-4C41-89B1-5A1694D1C7E4}_is1"
 
 
+def _installed_registry_values() -> dict[str, str]:
+    if os.name != "nt":
+        return {}
+    import winreg
+
+    key_path = rf"Software\Microsoft\Windows\CurrentVersion\Uninstall\{APP_ID}"
+    views = (0, winreg.KEY_WOW64_64KEY, winreg.KEY_WOW64_32KEY)
+    for hive in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
+        for view in views:
+            try:
+                with winreg.OpenKey(hive, key_path, 0, winreg.KEY_READ | view) as key:
+                    values: dict[str, str] = {}
+                    for name in (
+                        "DisplayVersion",
+                        "InstallLocation",
+                        "UninstallString",
+                        "QuietUninstallString",
+                    ):
+                        try:
+                            values[name] = str(winreg.QueryValueEx(key, name)[0]).strip()
+                        except OSError:
+                            continue
+                    if values:
+                        return values
+            except OSError:
+                continue
+    return {}
+
+
 def installed_details() -> tuple[str, Path]:
     default = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
     default /= "Programs/Neon Drive"
-    if os.name != "nt":
+    values = _installed_registry_values()
+    version = values.get("DisplayVersion", "")
+    install_location = values.get("InstallLocation", "")
+    if not values:
         return "не установлена", default
-    try:
-        import winreg
+    return version or "неизвестна", Path(install_location or default)
 
-        key_path = rf"Software\Microsoft\Windows\CurrentVersion\Uninstall\{APP_ID}"
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path) as key:
-            version = str(winreg.QueryValueEx(key, "DisplayVersion")[0])
-            install_location = str(winreg.QueryValueEx(key, "InstallLocation")[0])
-        return version or "неизвестна", Path(install_location or default)
-    except OSError:
-        return "не установлена", default
+
+def installed_uninstaller() -> Path | None:
+    values = _installed_registry_values()
+    raw = values.get("QuietUninstallString") or values.get("UninstallString") or ""
+    if raw.startswith('"'):
+        candidate = raw.split('"', 2)[1]
+    else:
+        marker = raw.casefold().find(".exe")
+        candidate = raw[: marker + 4] if marker >= 0 else raw.split(" ", 1)[0]
+    path = Path(candidate).expanduser() if candidate else Path()
+    return path if candidate and path.is_file() else None
+
+
+def same_version(left: str, right: str) -> bool:
+    return version_tuple(left) == version_tuple(right)
 
 
 def main_app_processes() -> list[psutil.Process]:
@@ -98,6 +138,7 @@ class VersionManagerWindow(QMainWindow):
         self.settings = QSettings("NeonTools", "Neon Drive Installer")
         self.dark_mode = self.settings.value("dark_mode", False, type=bool)
         self.installed_version, self.install_directory = installed_details()
+        self.uninstaller_path = installed_uninstaller()
         self.setWindowTitle("Neon Drive Installer")
         self.setMinimumSize(900, 620)
         self.resize(1040, 720)
@@ -165,10 +206,14 @@ class VersionManagerWindow(QMainWindow):
         actions = QHBoxLayout()
         self.github_button = QPushButton("Открыть на GitHub")
         self.github_button.clicked.connect(self.open_selected_release)
+        self.uninstall_button = QPushButton("Удалить установленную", objectName="danger")
+        self.uninstall_button.clicked.connect(self.uninstall_installed)
+        self.uninstall_button.setEnabled(self.uninstaller_path is not None)
         self.install_button = QPushButton("Скачать и установить", objectName="primary")
         self.install_button.clicked.connect(self.install_selected_release)
         self.install_button.setEnabled(False)
         actions.addWidget(self.github_button)
+        actions.addWidget(self.uninstall_button)
         actions.addStretch()
         actions.addWidget(self.install_button)
         details_layout.addLayout(actions)
@@ -228,6 +273,7 @@ class VersionManagerWindow(QMainWindow):
             QPushButton {{ background: {colors['button']}; border: 1px solid {colors['border']}; border-radius: 10px; padding: 8px 13px; font-weight: 650; }}
             QPushButton:hover {{ border-color: #22c8cf; color: #087f86; }}
             QPushButton#primary {{ background: #24d1d8; border-color: #24d1d8; color: #07161a; padding: 9px 17px; }}
+            QPushButton#danger {{ color: #d93025; border-color: #f2b8b5; }}
             QPushButton:disabled {{ color: {colors['disabled']}; background: {colors['button']}; }}
             QProgressBar {{ border: 1px solid {colors['border']}; border-radius: 7px; background: {colors['button']}; min-height: 12px; }}
             QProgressBar::chunk {{ background: #24d1d8; border-radius: 6px; }}
@@ -249,6 +295,7 @@ class VersionManagerWindow(QMainWindow):
         self.refresh_button.setEnabled(not busy)
         self.install_button.setEnabled(not busy and self.version_list.currentRow() >= 0)
         self.version_list.setEnabled(not busy)
+        self.uninstall_button.setEnabled(not busy and self.uninstaller_path is not None)
         self.progress.setVisible(busy)
         self.status.setText(text)
 
@@ -268,7 +315,11 @@ class VersionManagerWindow(QMainWindow):
         self.version_list.clear()
         for release in releases:
             channel = "BETA" if release.get("prerelease") else "STABLE"
-            current = "  • установлена" if release.get("version") == self.installed_version else ""
+            current = (
+                "  • установлена"
+                if same_version(str(release.get("version") or ""), self.installed_version)
+                else ""
+            )
             item = QListWidgetItem(f"{release.get('tag')}   [{channel}]{current}")
             item.setToolTip(str(release.get("published_at") or ""))
             self.version_list.addItem(item)
@@ -293,7 +344,7 @@ class VersionManagerWindow(QMainWindow):
         )
         notes = str(release.get("notes") or "Изменения для этой версии не описаны.")
         self.release_notes.setMarkdown(notes)
-        same = release.get("version") == self.installed_version
+        same = same_version(str(release.get("version") or ""), self.installed_version)
         self.install_button.setText("Переустановить выбранную" if same else "Скачать и установить")
         self.install_button.setEnabled(True)
 
@@ -330,6 +381,36 @@ class VersionManagerWindow(QMainWindow):
         thread.failed.connect(self.operation_failed)
         thread.finished.connect(lambda: setattr(self, "download_thread", None))
         thread.start()
+
+    def uninstall_installed(self) -> None:
+        if self.uninstaller_path is None:
+            QMessageBox.information(
+                self,
+                "Neon Drive Installer",
+                "Зарегистрированная установка Neon Drive не найдена.",
+            )
+            return
+        answer = QMessageBox.question(
+            self,
+            "Neon Drive Installer",
+            f"Удалить установленную версию {self.installed_version}?\n\n"
+            "Пользовательские настройки будут сохранены для будущей установки.",
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        if main_app_running():
+            try:
+                close_main_app()
+            except Exception as exc:
+                self.operation_failed(str(exc))
+                return
+        try:
+            subprocess.Popen([str(self.uninstaller_path)], close_fds=True)
+        except OSError as exc:
+            self.operation_failed(f"Не удалось запустить удаление: {exc}")
+            return
+        self.status.setText("Программа удаления запущена. Менеджер версий закрывается…")
+        QTimer.singleShot(400, QApplication.quit)
 
     def download_succeeded(self, downloaded: Path, release: dict) -> None:
         try:

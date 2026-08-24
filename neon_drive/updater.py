@@ -115,6 +115,24 @@ def _normalize_release(data: dict, method: str) -> dict:
 
 
 def latest_release() -> dict:
+    # GitHub's /releases/latest endpoint deliberately excludes prereleases.
+    # Beta builds must inspect the release list so the next beta is visible in-app.
+    if "-" in __version__:
+        data, method = _release_data(latest=False)
+        if not isinstance(data, list):
+            raise RuntimeError("GitHub вернул некорректный список релизов.")
+        candidates: list[dict] = []
+        for item in data:
+            if not isinstance(item, dict) or item.get("draft"):
+                continue
+            try:
+                candidates.append(_normalize_release(item, method))
+            except RuntimeError:
+                continue
+        if not candidates:
+            raise RuntimeError("Подходящие GitHub Releases не найдены.")
+        return max(candidates, key=lambda release: version_tuple(str(release["version"])))
+
     data, method = _release_data(latest=True)
     if not isinstance(data, dict):
         raise RuntimeError("GitHub вернул некорректные данные последнего релиза.")

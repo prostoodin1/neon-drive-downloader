@@ -92,6 +92,8 @@ def rclone_arguments(
         args.append("--local-no-sparse")
     if selected.local_no_preallocate:
         args.append("--local-no-preallocate")
+    if is_rclone_remote_path(destination):
+        args.append(f"--drive-chunk-size={max(1, int(selected.chunk_size_mib))}Mi")
     if selected.config_path:
         args.append(f"--config={selected.config_path}")
     return args, target

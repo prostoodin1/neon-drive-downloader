@@ -100,6 +100,7 @@ from .google_drive import (
     extract_authorize_token,
     google_drive_connected,
     managed_rclone_config_path,
+    oauth_completion_template_path,
     store_google_drive_token,
 )
 from .rclone_manager import (
@@ -112,6 +113,7 @@ from .rclone_manager import (
 from .single_instance import InstanceServer, send_request
 from .system_health import SystemHealthReport, run_system_health_check
 from .transfer_stats import TransferStats
+from .windows_startup import set_startup_enabled, startup_enabled
 from .updater import (
     REPOSITORY,
     SETUP_ASSET_NAME,
@@ -121,6 +123,7 @@ from .updater import (
     UpdateDownloadThread,
     last_downloaded_release,
     launch_replacement,
+    version_tuple,
 )
 from .turbo_copy import TurboCopyStopped, parallel_copy_file
 
@@ -1169,7 +1172,12 @@ class GoogleDriveOAuthThread(QThread):
             creationflags = subprocess.CREATE_NO_WINDOW
         try:
             self.process = subprocess.Popen(
-                [self.executable, "authorize", "drive"],
+                [
+                    self.executable,
+                    "authorize",
+                    "drive",
+                    f"--template={oauth_completion_template_path()}",
+                ],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
@@ -1289,6 +1297,7 @@ class MainWindow(QMainWindow):
         self.rclone_install_thread: RcloneInstallThread | None = None
         self.google_drive_oauth_thread: GoogleDriveOAuthThread | None = None
         self.system_health_thread: SystemHealthThread | None = None
+        self.system_health_silent = False
         self.robocopy_executable = "robocopy.exe"
         self.rclone_executable = "rclone.exe"
         self.beta_build = is_beta_build(__version__)
@@ -1316,12 +1325,19 @@ class MainWindow(QMainWindow):
         self.source_check_timer.setSingleShot(True)
         self.source_check_timer.setInterval(SOURCE_RECHECK_INTERVAL_MS)
         self.source_check_timer.timeout.connect(self.fill_worker_slots)
+        self.auto_health_timer = QTimer(self)
+        self.auto_health_timer.setSingleShot(True)
+        self.auto_health_timer.setInterval(1800)
+        self.auto_health_timer.timeout.connect(self.maybe_auto_system_health_check)
         self.build_ui()
         self.restore_settings()
+        if getattr(sys, "frozen", False):
+            self.apply_windows_startup_setting()
         self.cleanup_old_logs()
         self.setup_tray()
         if os.environ.get("NEON_DRIVE_DISABLE_AUTO_UPDATE") != "1":
             QTimer.singleShot(4000, self.auto_check_updates)
+        self.auto_health_timer.start()
 
     @staticmethod
     def card() -> QFrame:
@@ -1627,6 +1643,17 @@ class MainWindow(QMainWindow):
             self.tabs.setCurrentWidget(self.home_page)
         self.update_start_button()
 
+    def toggle_transfer_direction(self) -> None:
+        target = "download" if self.active_transfer == "upload" else "upload"
+        if target == "upload" and not self.upload_addon_enabled:
+            QMessageBox.information(
+                self,
+                APP_NAME,
+                "Сначала установите BETA-дополнение «Выгрузка» в разделе обновлений.",
+            )
+            return
+        self.show_transfer_direction(target)
+
     def build_transfer_tab(self, direction: str) -> QWidget:
         upload = direction == "upload"
         page = QWidget()
@@ -1714,6 +1741,15 @@ class MainWindow(QMainWindow):
             0,
         )
         path_grid.addWidget(self.label("КУДА · СЕТЕВОЙ ДИСК" if upload else "КУДА · ЛОКАЛЬНО"), 0, 2)
+        direction_toggle_button = QPushButton("⇅")
+        direction_toggle_button.setObjectName("directionToggleButton")
+        direction_toggle_button.setFixedSize(38, 30)
+        direction_toggle_button.setToolTip(
+            "Переключить на загрузку" if upload else "Переключить на выгрузку"
+        )
+        direction_toggle_button.setEnabled(upload or self.upload_addon_enabled)
+        direction_toggle_button.clicked.connect(self.toggle_transfer_direction)
+        path_grid.addWidget(direction_toggle_button, 0, 1, Qt.AlignmentFlag.AlignCenter)
         path_grid.addWidget(sources, 1, 0)
         arrow = QLabel("→", objectName="transferArrow")
         arrow.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -1872,6 +1908,7 @@ class MainWindow(QMainWindow):
         )
         self.transfer_panels[direction] = panel
         panel.google_drive_button = google_drive_button
+        panel.direction_toggle_button = direction_toggle_button
         panel.speed_graph = speed_graph
         panel.transfer_stats_label = transfer_stats_label
         preset_combo.currentIndexChanged.connect(
@@ -2334,6 +2371,12 @@ class MainWindow(QMainWindow):
         self.continue_in_tray_check = self.add_setting_toggle(
             behavior_box, "Продолжать загрузку после закрытия окна"
         )
+        self.keep_open_after_finish_check = self.add_setting_toggle(
+            behavior_box, "После завершения передачи оставлять Neon открытым в tray"
+        )
+        self.windows_startup_check = self.add_setting_toggle(
+            behavior_box, "Запускать Neon Drive при входе в Windows"
+        )
         self.notifications_check = self.add_setting_toggle(
             behavior_box, "Windows-уведомление после завершения"
         )
@@ -2407,7 +2450,9 @@ class MainWindow(QMainWindow):
                 combo.addItem(f"{value}{suffix}", value)
             return combo
 
-        self.rclone_chunk_combo = number_combo((16, 32, 64, 128, 256, 512), " МиБ")
+        self.rclone_chunk_combo = number_combo(
+            (16, 32, 64, 128, 256, 512, 1024, 2048), " МиБ"
+        )
         self.rclone_cutoff_combo = number_combo((64, 128, 256, 512, 1024), " МиБ")
         self.rclone_streams_combo = number_combo((1, 2, 4, 8, 12, 16, 24, 32))
         self.rclone_transfers_combo = number_combo((1, 2, 4, 8, 12, 16, 24, 32))
@@ -2528,6 +2573,9 @@ class MainWindow(QMainWindow):
         health_note.setObjectName("settingDescription")
         health_note.setWordWrap(True)
         health_box.addWidget(health_note)
+        self.auto_system_health_check = self.add_setting_toggle(
+            health_box, "Автоматически проверять и исправлять систему при запуске Neon"
+        )
         self.system_health_progress = QProgressBar()
         self.system_health_progress.setRange(0, 100)
         self.system_health_progress.setValue(0)
@@ -2857,6 +2905,9 @@ class MainWindow(QMainWindow):
                 if enabled
                 else "Установите дополнение «Выгрузка» в разделе обновлений"
             )
+        download_panel = self.transfer_panels.get("download")
+        if download_panel is not None and hasattr(download_panel, "direction_toggle_button"):
+            download_panel.direction_toggle_button.setEnabled(enabled)
         if not enabled and hasattr(self, "home_transfer_stack"):
             self.show_transfer_direction("download", switch_to_home=False)
         self.refresh_tab_indexes()
@@ -2879,7 +2930,12 @@ class MainWindow(QMainWindow):
         self.tabs.setCurrentWidget(self.settings_page)
         self.settings_gear_button.setToolTip("Вернуться к передаче")
 
-    def apply_transfer_preset(self, preset: str, persist: bool = True) -> None:
+    def apply_transfer_preset(
+        self,
+        preset: str,
+        persist: bool = True,
+        configure: bool = True,
+    ) -> None:
         """Apply the same simple speed preset to Robocopy and Rclone."""
         preset = preset if preset in ("slow", "optimal", "maximum") else "optimal"
         mapping = {
@@ -2902,6 +2958,8 @@ class MainWindow(QMainWindow):
             button.style().polish(button)
 
         if not hasattr(self, "copy_profile_combo"):
+            return
+        if not configure:
             return
 
         def select(combo: QComboBox, value) -> None:
@@ -3283,6 +3341,8 @@ class MainWindow(QMainWindow):
             #primary:disabled {{ background: {colors['track']}; color: {colors['disabled']}; border-color: {colors['border']}; }}
             #directionButton {{ min-width: 150px; background: transparent; color: {colors['muted']}; border-color: transparent; }}
             #directionButton:checked {{ background: {accent}; color: {accent_text}; border-color: {accent_hover}; }}
+            #directionToggleButton {{ background: {colors['button']}; color: {accent}; border: 1px solid {colors['border']}; border-radius: 10px; font-size: 18px; font-weight: 800; padding: 0; }}
+            #directionToggleButton:hover {{ background: {selected_surface}; border-color: {accent}; }}
             QProgressBar {{ background: {colors['track']}; border: 0; border-radius: 4px; height: 8px; }}
             QProgressBar::chunk {{ background: {accent}; border-radius: 4px; }}
             #progressText {{ font-size: 12px; font-weight: 700; }}
@@ -3483,6 +3543,15 @@ class MainWindow(QMainWindow):
         self.continue_in_tray_check.setChecked(
             self.settings.value("continue_in_tray", True, type=bool)
         )
+        self.keep_open_after_finish_check.setChecked(
+            self.settings.value("keep_open_after_finish", False, type=bool)
+        )
+        self.windows_startup_check.setChecked(
+            self.settings.value("windows_startup", startup_enabled(), type=bool)
+        )
+        self.auto_system_health_check.setChecked(
+            self.settings.value("auto_system_health", False, type=bool)
+        )
         self.notifications_check.setChecked(
             self.settings.value("notifications", True, type=bool)
         )
@@ -3501,6 +3570,7 @@ class MainWindow(QMainWindow):
         self.apply_transfer_preset(
             str(self.settings.value("transfer_preset", "optimal")),
             persist=False,
+            configure=False,
         )
 
         for signal in (
@@ -3539,6 +3609,9 @@ class MainWindow(QMainWindow):
             self.update_mode_combo.currentIndexChanged,
             self.tray_check.stateChanged,
             self.continue_in_tray_check.stateChanged,
+            self.keep_open_after_finish_check.stateChanged,
+            self.windows_startup_check.stateChanged,
+            self.auto_system_health_check.stateChanged,
             self.notifications_check.stateChanged,
             self.auto_start_check.stateChanged,
             self.smart_terminal_check.stateChanged,
@@ -3615,6 +3688,13 @@ class MainWindow(QMainWindow):
         self.settings.setValue("update_mode", self.update_mode_combo.currentData())
         self.settings.setValue("tray_enabled", self.tray_check.isChecked())
         self.settings.setValue("continue_in_tray", self.continue_in_tray_check.isChecked())
+        self.settings.setValue(
+            "keep_open_after_finish", self.keep_open_after_finish_check.isChecked()
+        )
+        self.settings.setValue("windows_startup", self.windows_startup_check.isChecked())
+        self.settings.setValue(
+            "auto_system_health", self.auto_system_health_check.isChecked()
+        )
         self.settings.setValue("notifications", self.notifications_check.isChecked())
         self.settings.setValue("auto_start", self.auto_start_check.isChecked())
         self.settings.setValue("smart_terminal", self.smart_terminal_check.isChecked())
@@ -3662,6 +3742,8 @@ class MainWindow(QMainWindow):
             self.set_monthly_transfer_stats_reset(
                 self.monthly_stats_reset_check.isChecked()
             )
+        if sender is self.windows_startup_check:
+            self.apply_windows_startup_setting()
         if sender is self.navigation_mode_combo:
             mode = str(self.navigation_mode_combo.currentData() or "side")
             self.sidebar_expanded = mode != "side_compact"
@@ -3675,6 +3757,27 @@ class MainWindow(QMainWindow):
         self.refresh_file_rows("upload")
         if sender in (self.tray_check, self.notifications_check):
             self.setup_tray()
+
+    def windows_startup_command(self) -> str:
+        if getattr(sys, "frozen", False):
+            arguments = [str(Path(sys.executable).resolve()), "--startup"]
+        else:
+            arguments = [sys.executable, str(resource_path("main.py")), "--startup"]
+        return subprocess.list2cmdline(arguments)
+
+    def apply_windows_startup_setting(self) -> None:
+        enabled = self.windows_startup_check.isChecked()
+        try:
+            set_startup_enabled(enabled, self.windows_startup_command())
+        except OSError as exc:
+            self.windows_startup_check.blockSignals(True)
+            self.windows_startup_check.setChecked(not enabled)
+            self.windows_startup_check.blockSignals(False)
+            QMessageBox.warning(
+                self,
+                APP_NAME,
+                f"Не удалось изменить автозапуск Windows:\n{exc}",
+            )
 
     @staticmethod
     def set_combo_data(combo: QComboBox, value: int) -> None:
@@ -4171,7 +4274,11 @@ class MainWindow(QMainWindow):
         self.system_health_status.style().unpolish(self.system_health_status)
         self.system_health_status.style().polish(self.system_health_status)
 
-    def start_system_health_check(self) -> None:
+    def maybe_auto_system_health_check(self) -> None:
+        if self.auto_system_health_check.isChecked() and not self.running:
+            self.start_system_health_check(silent=True)
+
+    def start_system_health_check(self, silent: bool = False) -> None:
         if self.system_health_thread is not None and self.system_health_thread.isRunning():
             return
         if self.running or self.workers or self.turbo_workers:
@@ -4190,6 +4297,7 @@ class MainWindow(QMainWindow):
             )
             return
 
+        self.system_health_silent = bool(silent)
         self.persist_settings()
         self.system_health_button.setEnabled(False)
         self.system_health_button.setText("ПРОВЕРКА…")
@@ -4256,23 +4364,25 @@ class MainWindow(QMainWindow):
         ]
         self.append_log("\nСИСТЕМНАЯ ДИАГНОСТИКА\n" + "\n".join(lines) + "\n")
         message = self.system_health_summary.text() + "\n\n" + "\n".join(lines)
-        if report.error_count:
-            QMessageBox.critical(self, "Диагностика Neon Drive", message)
-        elif report.warning_count:
-            QMessageBox.warning(self, "Диагностика Neon Drive", message)
-        else:
-            QMessageBox.information(self, "Диагностика Neon Drive", message)
+        if not self.system_health_silent:
+            if report.error_count:
+                QMessageBox.critical(self, "Диагностика Neon Drive", message)
+            elif report.warning_count:
+                QMessageBox.warning(self, "Диагностика Neon Drive", message)
+            else:
+                QMessageBox.information(self, "Диагностика Neon Drive", message)
 
     @Slot(str)
     def system_health_failed(self, message: str) -> None:
         self.set_system_health_state("error", "✕  ПРОВЕРКА ПРЕРВАНА")
         self.system_health_summary.setText(message)
         self.append_log(f"Системная диагностика: {message}\n")
-        QMessageBox.critical(
-            self,
-            "Диагностика Neon Drive",
-            f"Не удалось завершить диагностику:\n{message}",
-        )
+        if not self.system_health_silent:
+            QMessageBox.critical(
+                self,
+                "Диагностика Neon Drive",
+                f"Не удалось завершить диагностику:\n{message}",
+            )
 
     @Slot()
     def system_health_finished(self) -> None:
@@ -4280,6 +4390,7 @@ class MainWindow(QMainWindow):
         self.system_health_button.setEnabled(True)
         self.system_health_button.setText("ПРОВЕРИТЬ ЕЩЁ РАЗ")
         self.system_health_thread = None
+        self.system_health_silent = False
 
     def resolved_rclone_executable(self) -> str | None:
         custom = self.rclone_path_edit.text().strip() if hasattr(self, "rclone_path_edit") else ""
@@ -4780,6 +4891,7 @@ class MainWindow(QMainWindow):
                     panel.clear_button,
                     panel.browse_button,
                     getattr(panel, "google_drive_button", panel.browse_button),
+                    getattr(panel, "direction_toggle_button", panel.browse_button),
                 ]
             )
         for widget in (
@@ -5436,6 +5548,10 @@ class MainWindow(QMainWindow):
 
     def maybe_close_when_idle(self) -> None:
         if self.close_when_idle and not self.workers and not self.turbo_workers:
+            if self.keep_open_after_finish_check.isChecked():
+                self.close_when_idle = False
+                self.setup_tray()
+                return
             self.force_exit = True
             QTimer.singleShot(0, self.close)
 
@@ -5652,7 +5768,12 @@ class MainWindow(QMainWindow):
         for index, release in enumerate(releases):
             published = str(release.get("published_at", ""))[:10]
             channel = " · BETA" if release.get("prerelease") else ""
-            marker = " · установлена" if release.get("version") == __version__ else ""
+            marker = (
+                " · установлена"
+                if version_tuple(str(release.get("version") or ""))
+                == version_tuple(__version__)
+                else ""
+            )
             self.release_combo.addItem(
                 f"{release.get('tag', release.get('version'))}{channel} · {published}{marker}",
                 index,
@@ -5752,6 +5873,7 @@ class MainWindow(QMainWindow):
             event.ignore()
             return
         if self.force_exit:
+            self.auto_health_timer.stop()
             event.accept()
             return
         if (
@@ -5763,9 +5885,14 @@ class MainWindow(QMainWindow):
         ):
             self.close_when_idle = True
             self.hide()
+            ending = (
+                "После завершения Neon останется в tray."
+                if self.keep_open_after_finish_check.isChecked()
+                else "После завершения Neon Drive полностью закроется."
+            )
             self.notify(
                 APP_NAME,
-                "Передача продолжится в фоне. После завершения Neon Drive полностью закроется.",
+                f"Передача продолжится в фоне. {ending}",
             )
             event.ignore()
             return
@@ -5784,6 +5911,7 @@ class MainWindow(QMainWindow):
             event.ignore()
             self.maybe_close_when_idle()
             return
+        self.auto_health_timer.stop()
         event.accept()
 
     def resizeEvent(self, event) -> None:  # noqa: N802

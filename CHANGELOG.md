@@ -1,5 +1,29 @@
 # Changelog
 
+## 5.5.0-beta.5
+
+- Added optional automatic full system diagnostics and safe repair at application startup.
+- Added Windows sign-in startup registration managed from Settings.
+- Added an option to keep Neon alive in the system tray after a background queue finishes.
+- Added a compact download/upload direction switch directly above the Home transfer arrow.
+- Made the selected Rclone chunk size control the real Google Drive upload chunk; the
+  manual maximum is now 2048 MiB (2 GiB), while the Extreme profile uses a safer
+  valid 512 MiB chunk (approximately 537 MB).
+- Fixed automatic update discovery in beta builds so newer prereleases are visible and
+  can be downloaded directly from the in-app Updates page.
+- Added a branded OAuth completion page that asks the browser tab to close automatically
+  after Google Drive is connected.
+- Fixed diagnostics for the managed `NeonGoogleDrive:` OAuth destination so it is never
+  treated as a local Explorer folder.
+- Made the version manager detect user/system installations across 32-bit and 64-bit
+  registry views and compare beta versions semantically.
+- Added an installer action to launch the registered Neon Drive uninstaller while retaining
+  user settings for a later reinstall; normal upgrades continue to preserve every setting.
+- Fixed startup restoration so a saved simple preset no longer overwrites manual Rclone,
+  queue, chunk, stream, checksum, or copy-profile settings after an update or restart.
+- Added focused tests for startup registration, direct Drive diagnostics, direction switching,
+  background completion behavior, uninstallation, version matching, and Drive chunk flags.
+
 ## 5.5.0-beta.4
 
 - Added a one-click Google Drive OAuth2 connection using the bundled Rclone browser flow.

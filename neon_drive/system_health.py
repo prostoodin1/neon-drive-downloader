@@ -10,6 +10,8 @@ from pathlib import Path
 from uuid import uuid4
 
 from .rclone_manager import VERSION_URL, download_and_install_rclone
+from .copy_engines import is_rclone_remote_path
+from .google_drive import google_drive_connected
 
 
 ProgressCallback = Callable[[int, str], None]
@@ -272,19 +274,31 @@ def run_system_health_check(
         )
     if upload_destination.strip():
         _emit(progress, 91, "Проверка папки Google Drive…")
-        upload_path = Path(upload_destination).expanduser()
-        if is_drive_root(upload_path):
+        if is_rclone_remote_path(upload_destination):
+            connected = google_drive_connected()
             items.append(
                 HealthCheckItem(
-                    "Папка выгрузки Google Drive",
-                    "error",
-                    "Выбран виртуальный корень диска. Укажите My Drive / Мой диск / Mi unidad или вложенную папку.",
+                    "Прямое подключение Google Drive",
+                    "ok" if connected else "error",
+                    "OAuth2-подключение Neon доступно."
+                    if connected
+                    else "OAuth2-подключение не найдено. Подключите Google Drive в настройках Rclone.",
                 )
             )
         else:
-            items.append(
-                probe_directory(upload_path, "Папка выгрузки Google Drive", False)
-            )
+            upload_path = Path(upload_destination).expanduser()
+            if is_drive_root(upload_path):
+                items.append(
+                    HealthCheckItem(
+                        "Папка выгрузки Google Drive",
+                        "error",
+                        "Выбран виртуальный корень диска. Укажите My Drive / Мой диск / Mi unidad или вложенную папку.",
+                    )
+                )
+            else:
+                items.append(
+                    probe_directory(upload_path, "Папка выгрузки Google Drive", False)
+                )
 
     _emit(progress, 96, "Проверка выбранных файлов…")
     source_result = check_sources(sources)
