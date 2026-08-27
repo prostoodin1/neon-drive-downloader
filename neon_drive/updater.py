@@ -253,7 +253,7 @@ def bootloader_parent_pid(current_executable: Path) -> int:
 def launch_replacement(downloaded: Path, current_executable: Path) -> None:
     if not getattr(sys, "frozen", False):
         raise RuntimeError("Автоустановка доступна только в собранной версии Neon Drive.")
-    if is_macos() and downloaded.name == MACOS_ASSET_NAME:
+    if is_macos() and downloaded.name in (MACOS_ASSET_NAME, MACOS_ARM_ASSET_NAME):
         subprocess.Popen(["open", str(downloaded)], close_fds=True)
         return
     pid_to_wait = bootloader_parent_pid(current_executable)

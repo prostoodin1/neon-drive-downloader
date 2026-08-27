@@ -116,6 +116,12 @@ class Beta7Tests(unittest.TestCase):
             release = updater._normalize_release(data, "public")
             self.assertEqual(release["asset_name"], updater.MACOS_ARM_ASSET_NAME)
 
+    def test_arm_update_opens_dmg_without_windows_commands(self):
+        with patch.object(updater, "is_macos", return_value=True), patch.object(updater.sys, "frozen", True, create=True), patch.object(updater.subprocess, "Popen") as popen:
+            package = Path("/tmp") / updater.MACOS_ARM_ASSET_NAME
+            updater.launch_replacement(package, Path("/Applications/Neon Drive.app/Contents/MacOS/NeonDriveDownloader"))
+            popen.assert_called_once_with(["open", str(package)], close_fds=True)
+
     def test_mac_uninstall_is_recoverable_and_rejects_other_targets(self):
         with tempfile.TemporaryDirectory() as temporary, patch("pathlib.Path.home", return_value=Path(temporary)):
             app = Path(temporary) / "Applications/Neon Drive.app"

@@ -908,7 +908,7 @@ class RcloneDownloader(QProcess):
         if ok:
             self.log.emit("\nКОД RCLONE: 0. Копирование успешно завершено.\n")
         elif self._user_stopped:
-            self.log.emit("\nRclone остановлен пользователем; частичный файл сохранён.\n")
+            self.log.emit("\nRclone остановлен пользователем.\n")
         else:
             self.log.emit(f"\nОШИБКА RCLONE: код {exit_code}.\n")
         if not ok:
@@ -5929,8 +5929,10 @@ class MainWindow(QMainWindow):
                     task.status = "ОСТАНОВЛЕНО"
                     self.sync_files_overview_row(self.active_transfer, task.source)
             self.set_state("●  ОСТАНОВЛЕНО")
-            self.append_log("\nОчередь остановлена. Частичные файлы оставлены для продолжения.\n")
-            notification = f"{operation} остановлена. Частичные файлы сохранены."
+            buffered = self.active_transfer == "download" and self.download_buffer_check.isChecked()
+            detail = "Временный файловый буфер очищен." if buffered else "Частичные файлы оставлены для продолжения."
+            self.append_log(f"\nОчередь остановлена. {detail}\n")
+            notification = f"{operation} остановлена. {detail}"
         elif self.failed_items:
             self.set_state("●  ЗАВЕРШЕНО С ОШИБКАМИ")
             self.append_log(f"\nЗавершено с ошибками: {self.failed_items}.\n")
