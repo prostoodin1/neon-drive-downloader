@@ -15,14 +15,16 @@ import psutil
 from PySide6.QtCore import QThread, Signal
 
 from . import __version__
+from .platform_support import app_data_directory, is_macos
 
 
 REPOSITORY = "prostoodin1/neon-drive-downloader"
 SETUP_ASSET_NAME = "NeonDrive-Setup.exe"
 PREVIOUS_SETUP_ASSET_NAME = "NeonDriveDownloader-Setup.exe"
 LEGACY_ASSET_NAME = "NeonDriveDownloader.exe"
+MACOS_ASSET_NAME = "NeonDrive-macOS-x64.dmg"
 SETUP_ASSET_NAMES = (SETUP_ASSET_NAME, PREVIOUS_SETUP_ASSET_NAME)
-ASSET_NAMES = (*SETUP_ASSET_NAMES, LEGACY_ASSET_NAME)
+ASSET_NAMES = (*SETUP_ASSET_NAMES, LEGACY_ASSET_NAME, MACOS_ASSET_NAME)
 API_URL = f"https://api.github.com/repos/{REPOSITORY}/releases/latest"
 RELEASES_URL = f"https://api.github.com/repos/{REPOSITORY}/releases?per_page=100"
 LAST_DOWNLOAD_DIRECTORY = "last-download"
@@ -30,8 +32,7 @@ LAST_DOWNLOAD_METADATA = "release.json"
 
 
 def app_data_dir() -> Path:
-    base = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
-    return base / "NeonDriveDownloader"
+    return app_data_directory()
 
 
 def version_tuple(value: str) -> tuple[int, ...]:
@@ -84,8 +85,13 @@ def _release_data(latest: bool = True) -> tuple[object, str]:
 def _normalize_release(data: dict, method: str) -> dict:
     tag = str(data.get("tag_name", ""))
     assets = data.get("assets") or []
+    preferred_names = (
+        (MACOS_ASSET_NAME,)
+        if is_macos()
+        else (*SETUP_ASSET_NAMES, LEGACY_ASSET_NAME)
+    )
     asset = next(
-        (item for name in ASSET_NAMES for item in assets if item.get("name") == name),
+        (item for name in preferred_names for item in assets if item.get("name") == name),
         None,
     )
     if not tag or not asset:
@@ -244,7 +250,10 @@ def bootloader_parent_pid(current_executable: Path) -> int:
 
 def launch_replacement(downloaded: Path, current_executable: Path) -> None:
     if not getattr(sys, "frozen", False):
-        raise RuntimeError("Автоустановка доступна только в собранной EXE-версии.")
+        raise RuntimeError("Автоустановка доступна только в собранной версии Neon Drive.")
+    if is_macos() and downloaded.name == MACOS_ASSET_NAME:
+        subprocess.Popen(["open", str(downloaded)], close_fds=True)
+        return
     pid_to_wait = bootloader_parent_pid(current_executable)
     if downloaded.name.casefold() in {name.casefold() for name in SETUP_ASSET_NAMES}:
         bundle_dir = Path(str(getattr(sys, "_MEIPASS", "")))

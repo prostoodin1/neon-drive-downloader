@@ -12,6 +12,13 @@ import zipfile
 from collections.abc import Callable
 from pathlib import Path
 
+from .platform_support import (
+    app_data_directory,
+    is_macos,
+    rclone_executable_name,
+    rclone_package_platform,
+)
+
 
 DOWNLOADS_ROOT = "https://downloads.rclone.org"
 VERSION_URL = f"{DOWNLOADS_ROOT}/version.txt"
@@ -36,7 +43,7 @@ def _replace_executable(temporary: Path, target: Path) -> None:
                 time.sleep(0.25)
     raise RuntimeError(
         "Rclone сейчас используется другим процессом. Остановите все загрузки и выгрузки, "
-        "закройте оставшийся rclone.exe в диспетчере задач и повторите обновление."
+        "закройте оставшийся процесс Rclone и повторите обновление."
     ) from last_error
 
 
@@ -44,8 +51,7 @@ def rclone_install_directory() -> Path:
     override = os.environ.get("NEON_DRIVE_RCLONE_DIR")
     if override:
         return Path(override).expanduser()
-    base = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
-    return base / "NeonDriveDownloader" / "tools" / "rclone"
+    return app_data_directory() / "tools" / "rclone"
 
 
 def bundled_rclone_directory() -> Path:
@@ -57,7 +63,7 @@ def bundled_rclone_directory() -> Path:
 
 
 def bundled_rclone_path() -> Path | None:
-    path = bundled_rclone_directory() / "rclone.exe"
+    path = bundled_rclone_directory() / rclone_executable_name()
     return path if path.is_file() else None
 
 
@@ -72,7 +78,7 @@ def bundled_rclone_version() -> str | None:
 
 
 def installed_rclone_path() -> Path | None:
-    path = rclone_install_directory() / "rclone.exe"
+    path = rclone_install_directory() / rclone_executable_name()
     return path if path.is_file() else None
 
 
@@ -129,7 +135,8 @@ def _release_details(progress: ProgressCallback | None = None) -> tuple[str, str
     if not match:
         raise RuntimeError("Не удалось определить последнюю версию Rclone.")
     version = match.group(0)
-    filename = f"rclone-{version}-windows-amd64.zip"
+    target_platform, target_arch = rclone_package_platform()
+    filename = f"rclone-{version}-{target_platform}-{target_arch}.zip"
     base_url = f"{DOWNLOADS_ROOT}/{version}"
     sums = _fetch_bytes(f"{base_url}/SHA256SUMS", MAX_TEXT_BYTES).decode(
         "utf-8-sig", errors="replace"
@@ -139,7 +146,7 @@ def _release_details(progress: ProgressCallback | None = None) -> tuple[str, str
         sums,
     )
     if not checksum_match:
-        raise RuntimeError("Официальная контрольная сумма Windows-архива Rclone не найдена.")
+        raise RuntimeError("Официальная контрольная сумма архива Rclone не найдена.")
     return version, filename, checksum_match.group(1).lower()
 
 
@@ -164,20 +171,22 @@ def download_and_install_rclone(
             item
             for item in package.infolist()
             if not item.is_dir()
-            and item.filename.replace("\\", "/").casefold().endswith("/rclone.exe")
+            and item.filename.replace("\\", "/").casefold().endswith(
+                "/" + rclone_executable_name().casefold()
+            )
         ]
         if len(candidates) != 1:
-            raise RuntimeError("В официальном архиве не найден единственный rclone.exe.")
+            raise RuntimeError("В официальном архиве не найден единственный файл Rclone.")
         executable_info = candidates[0]
         if executable_info.file_size <= 0 or executable_info.file_size > MAX_EXECUTABLE_BYTES:
-            raise RuntimeError("rclone.exe имеет неожиданный размер.")
+            raise RuntimeError("Rclone имеет неожиданный размер.")
         target_dir = rclone_install_directory()
         target_dir.mkdir(parents=True, exist_ok=True)
-        target = target_dir / "rclone.exe"
+        target = target_dir / rclone_executable_name()
         temporary = target.with_suffix(".download")
         try:
             if progress:
-                progress(92, "Подключение rclone.exe к Neon Drive…")
+                progress(92, "Подключение Rclone к Neon Drive…")
             with package.open(executable_info) as source, temporary.open("wb") as destination:
                 while True:
                     chunk = source.read(256 * 1024)
@@ -185,11 +194,19 @@ def download_and_install_rclone(
                         break
                     destination.write(chunk)
             if temporary.stat().st_size != executable_info.file_size:
-                raise RuntimeError("rclone.exe извлечён не полностью.")
+                raise RuntimeError("Rclone извлечён не полностью.")
             with temporary.open("rb") as executable:
-                if executable.read(2) != b"MZ":
-                    raise RuntimeError("Извлечённый файл не является Windows-приложением.")
+                header = executable.read(4)
+                valid_header = (
+                    header in {b"\xcf\xfa\xed\xfe", b"\xca\xfe\xba\xbe"}
+                    if is_macos()
+                    else header.startswith(b"MZ")
+                )
+                if not valid_header:
+                    raise RuntimeError("Извлечённый файл Rclone имеет неверный формат.")
             _replace_executable(temporary, target)
+            if is_macos():
+                target.chmod(target.stat().st_mode | 0o755)
         finally:
             temporary.unlink(missing_ok=True)
 

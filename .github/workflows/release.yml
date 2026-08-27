@@ -1,4 +1,4 @@
-name: Build Windows Release
+name: Build Neon Drive Release
 
 on:
   push:
@@ -12,69 +12,98 @@ jobs:
   build-windows:
     runs-on: windows-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
           cache: pip
-
       - name: Install dependencies
         run: python -m pip install -r requirements.txt
-
-      - name: Test progress parser
-        run: python -m unittest discover -s tests
-
-      - name: Download and verify bundled Rclone
+      - name: Run all tests in isolated Qt processes
+        run: python scripts/run_tests.py
+      - name: Download verified bundled Rclone
         run: python scripts/fetch_rclone.py
-
-      - name: Build Neon Drive, hidden agent CLI, and version manager
+      - name: Build application, hidden CLI, and version manager
         run: |
           python -m PyInstaller --noconfirm --clean NeonDriveDownloader.spec
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python -m PyInstaller --noconfirm --clean NeonDriveInstaller.spec
-
-      - name: Build installer without onefile extraction
+      - name: Smoke-test packaged application
+        run: python scripts/smoke_bundle.py dist/NeonDriveDownloader
+      - name: Build Windows installer
         shell: pwsh
         run: |
           choco install innosetup -y --no-progress
           $version = "${{ github.ref_name }}".TrimStart("v")
-          $versionParts = @(
-            [regex]::Matches($version, "\d+") |
-              Select-Object -First 4 |
-              ForEach-Object { $_.Value }
-          )
+          $versionParts = @([regex]::Matches($version, "\d+") | Select-Object -First 4 | ForEach-Object { $_.Value })
           while ($versionParts.Count -lt 4) { $versionParts += "0" }
           $fileVersion = $versionParts -join "."
-          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" `
-            "/DMyAppVersion=$version" "/DMyAppFileVersion=$fileVersion" "installer.iss"
-
-      - name: Verify artifact
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" "/DMyAppVersion=$version" "/DMyAppFileVersion=$fileVersion" installer.iss
+      - name: Verify installers
         shell: pwsh
         run: |
-          $files = @(
-            "dist\NeonDrive-Setup.exe",
-            "dist\NeonDriveInstaller.exe"
-          )
-          foreach($path in $files) {
+          foreach ($path in @("dist/NeonDrive-Setup.exe", "dist/NeonDriveInstaller.exe")) {
             $file = Get-Item $path
             if ($file.Length -lt 1000000) { throw "$path is unexpectedly small" }
             Get-FileHash $file.FullName -Algorithm SHA256
           }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-installers
+          path: |
+            dist/NeonDrive-Setup.exe
+            dist/NeonDriveInstaller.exe
+          if-no-files-found: error
 
-      - name: Publish GitHub Release
-        shell: pwsh
+  build-macos:
+    runs-on: macos-15-intel
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          architecture: x64
+          cache: pip
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Run cross-platform tests
+        run: python scripts/run_tests.py tests.test_copy_engines tests.test_google_drive tests.test_updater tests.test_platform_support tests.test_beta6 tests.test_single_instance tests.test_windows_startup.WindowsStartupTests.test_macos_launch_agent_can_be_enabled_and_removed tests.test_rclone_manager.RcloneManagerTests.test_macos_archive_is_verified_and_installed_as_executable
+      - name: Download verified bundled Rclone for Intel
+        run: python scripts/fetch_rclone.py --platform osx --arch amd64 --force
+      - name: Build macOS application
+        run: python -m PyInstaller --noconfirm --clean NeonDriveDownloader.spec
+      - name: Smoke-test packaged application
+        run: python scripts/smoke_bundle.py "dist/Neon Drive.app"
+      - name: Create DMG
+        run: |
+          mkdir -p dist/dmg
+          cp -R "dist/Neon Drive.app" dist/dmg/
+          ln -s /Applications dist/dmg/Applications
+          hdiutil create -volname "Neon Drive" -srcfolder dist/dmg -ov -format UDZO dist/NeonDrive-macOS-x64.dmg
+          test $(stat -f%z dist/NeonDrive-macOS-x64.dmg) -gt 1000000
+          shasum -a 256 dist/NeonDrive-macOS-x64.dmg
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-installer
+          path: dist/NeonDrive-macOS-x64.dmg
+          if-no-files-found: error
+
+  publish:
+    needs: [build-windows, build-macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: release
+          merge-multiple: true
+      - name: Publish complete prerelease
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $tag = "${{ github.ref_name }}"
-          $arguments = @(
-            "release", "create", $tag,
-            "dist\NeonDrive-Setup.exe",
-            "dist\NeonDriveInstaller.exe",
-            "--title", "Neon Drive $tag",
-            "--generate-notes"
-          )
-          if ($tag.Contains("-")) { $arguments += "--prerelease" }
-          & gh @arguments
+          tag="${{ github.ref_name }}"
+          args=()
+          if [[ "$tag" == *-* ]]; then args+=(--prerelease); fi
+          gh release create "$tag" release/NeonDrive-Setup.exe release/NeonDriveInstaller.exe release/NeonDrive-macOS-x64.dmg --title "Neon Drive $tag" --notes-file RELEASE_NOTES.md "${args[@]}"

@@ -12,6 +12,7 @@ from uuid import uuid4
 from .rclone_manager import VERSION_URL, download_and_install_rclone
 from .copy_engines import is_rclone_remote_path
 from .google_drive import google_drive_connected
+from .platform_support import is_macos
 
 
 ProgressCallback = Callable[[int, str], None]
@@ -212,17 +213,27 @@ def run_system_health_check(
     except OSError as exc:
         items.append(HealthCheckItem("Свободное место", "warning", str(exc)))
 
-    _emit(progress, 26, "Проверка Robocopy…")
-    robocopy = shutil.which("robocopy.exe") or shutil.which("robocopy")
-    items.append(
-        HealthCheckItem(
-            "Robocopy",
-            "ok" if robocopy else "error",
-            f"Системный Robocopy найден: {robocopy}"
-            if robocopy
-            else "Robocopy не найден в Windows. Автоматическая установка системного компонента невозможна.",
+    if is_macos():
+        _emit(progress, 26, "Проверка движка macOS…")
+        items.append(
+            HealthCheckItem(
+                "Движок macOS",
+                "ok",
+                "На macOS передачи выполняются через Rclone; Robocopy не требуется.",
+            )
         )
-    )
+    else:
+        _emit(progress, 26, "Проверка Robocopy…")
+        robocopy = shutil.which("robocopy.exe") or shutil.which("robocopy")
+        items.append(
+            HealthCheckItem(
+                "Robocopy",
+                "ok" if robocopy else "error",
+                f"Системный Robocopy найден: {robocopy}"
+                if robocopy
+                else "Robocopy не найден в Windows. Автоматическая установка системного компонента невозможна.",
+            )
+        )
 
     _emit(progress, 34, "Проверка Rclone…")
     rclone_ok, rclone_details = check_rclone_executable(rclone_candidate)

@@ -1,5 +1,24 @@
 # Changelog
 
+## 5.5.0-beta.6
+
+- Added a macOS application and DMG release build with macOS 11 Big Sur as the
+  minimum target, platform-native application data paths, Finder integration,
+  bundled Rclone, and login startup through a LaunchAgent.
+- Added a separate Rclone monitor window with a live speed graph, current state,
+  and full terminal output; it can open automatically when an Rclone transfer starts.
+- Added green, yellow, and red hover borders and soft glows to the Slow, Optimal,
+  and Maximum template cards so their performance tradeoffs are easier to scan.
+- Added optional contextual button colors: blue for downloads, green for uploads,
+  yellow for folders, red for destructive actions, and purple for the Rclone monitor.
+- Added an automatic day/night theme that uses the light palette from 07:00 to 19:00
+  and the dark palette at night, while retaining all manual theme choices.
+- Rechecked the Beta 5 direction switch and device-login startup features shared by
+  upgrade logs #004, #005, and #006 to avoid duplicate controls or conflicting settings.
+- Added regression tests for macOS platform paths and version requirements, macOS
+  startup registration, DMG update selection, profile hover states, contextual colors,
+  the Rclone monitor, and automatic theme boundaries.
+
 ## 5.5.0-beta.5
 
 - Added optional automatic full system diagnostics and safe repair at application startup.

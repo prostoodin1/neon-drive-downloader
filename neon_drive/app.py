@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -51,6 +52,8 @@ from PySide6.QtWidgets import (
     QComboBox,
     QFileDialog,
     QFrame,
+    QDialog,
+    QGraphicsDropShadowEffect,
     QGraphicsOpacityEffect,
     QGridLayout,
     QHBoxLayout,
@@ -102,6 +105,12 @@ from .google_drive import (
     managed_rclone_config_path,
     oauth_completion_template_path,
     store_google_drive_token,
+)
+from .platform_support import (
+    app_data_directory,
+    is_macos,
+    macos_version_supported,
+    rclone_executable_name,
 )
 from .rclone_manager import (
     bundled_rclone_path,
@@ -176,8 +185,7 @@ PERCENT_RE = re.compile(r"(?<!\d)(?P<pct>\d{1,3}(?:[.,]\d+)?)%")
 
 
 def app_data_dir() -> Path:
-    base = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
-    return base / "NeonDriveDownloader"
+    return app_data_directory()
 
 
 def console_encoding() -> str:
@@ -518,6 +526,80 @@ class SpeedGraph(QWidget):
         painter.fillPath(fill, self.fill_color)
         painter.setPen(QPen(self.accent_color, 3, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
         painter.drawPath(line)
+
+
+class ProfileCard(QFrame):
+    COLORS = {
+        "slow": QColor("#34a853"),
+        "optimal": QColor("#f9ab00"),
+        "maximum": QColor("#ea4335"),
+    }
+
+    def __init__(self, profile_key: str) -> None:
+        super().__init__()
+        self.profile_key = profile_key
+        self.setObjectName("profileCard")
+        self.setProperty("profileKey", profile_key)
+        self.glow = QGraphicsDropShadowEffect(self)
+        self.glow.setBlurRadius(0)
+        self.glow.setOffset(0, 0)
+        self.glow.setColor(self.COLORS.get(profile_key, QColor("#00e8f5")))
+        self.setGraphicsEffect(self.glow)
+
+    def enterEvent(self, event) -> None:  # noqa: N802
+        self.glow.setBlurRadius(28)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:  # noqa: N802
+        self.glow.setBlurRadius(0)
+        super().leaveEvent(event)
+
+
+class RcloneMonitorWindow(QDialog):
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Neon Drive · Монитор Rclone")
+        self.setMinimumSize(720, 480)
+        self.resize(900, 610)
+        layout = QVBoxLayout(self)
+        header = QHBoxLayout()
+        title = QLabel("RCLONE · СЕТЬ И ТЕРМИНАЛ", objectName="sectionTitle")
+        self.speed_label = QLabel("0.0 МБ/с", objectName="speed")
+        self.state_label = QLabel("● ОЖИДАНИЕ", objectName="state")
+        header.addWidget(title)
+        header.addStretch()
+        header.addWidget(self.speed_label)
+        header.addWidget(self.state_label)
+        layout.addLayout(header)
+        self.graph = SpeedGraph()
+        self.graph.setMinimumHeight(155)
+        layout.addWidget(self.graph)
+        self.terminal = QPlainTextEdit(objectName="terminal")
+        self.terminal.setMaximumBlockCount(5000)
+        self.terminal.setReadOnly(True)
+        self.terminal.setPlaceholderText("Команды и вывод Rclone появятся здесь…")
+        layout.addWidget(self.terminal, 1)
+
+    def reset_monitor(self) -> None:
+        self.graph.values.clear()
+        self.graph.values.append(0.0)
+        self.graph.update()
+        self.terminal.clear()
+        self.set_speed(0.0)
+        self.state_label.setText("● ЗАПУСК")
+
+    def set_speed(self, speed_mib: float) -> None:
+        self.graph.setValue(speed_mib)
+        self.speed_label.setText(f"{speed_mib:.1f} МБ/с")
+
+    def append_text(self, text: str) -> None:
+        cursor = self.terminal.textCursor()
+        cursor.movePosition(QTextCursor.MoveOperation.End)
+        cursor.insertText(text)
+        self.terminal.setTextCursor(cursor)
+        self.terminal.verticalScrollBar().setValue(
+            self.terminal.verticalScrollBar().maximum()
+        )
 
 
 class Downloader(QProcess):
@@ -958,6 +1040,8 @@ class FileRow(QFrame):
     def reveal(path: Path) -> None:
         if path.is_dir():
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+        elif is_macos():
+            QProcess.startDetached("open", ["-R", str(path)])
         else:
             QProcess.startDetached("explorer.exe", ["/select,", str(path)])
 
@@ -1298,8 +1382,10 @@ class MainWindow(QMainWindow):
         self.google_drive_oauth_thread: GoogleDriveOAuthThread | None = None
         self.system_health_thread: SystemHealthThread | None = None
         self.system_health_silent = False
+        self.rclone_monitor: RcloneMonitorWindow | None = None
+        self.active_engines: set[str] = set()
         self.robocopy_executable = "robocopy.exe"
-        self.rclone_executable = "rclone.exe"
+        self.rclone_executable = rclone_executable_name()
         self.beta_build = is_beta_build(__version__)
         self.upload_addon_enabled = self.beta_build and upload_addon_installed(__version__)
         self.advanced_mode_visible = self.settings.value(
@@ -1329,15 +1415,19 @@ class MainWindow(QMainWindow):
         self.auto_health_timer.setSingleShot(True)
         self.auto_health_timer.setInterval(1800)
         self.auto_health_timer.timeout.connect(self.maybe_auto_system_health_check)
+        self.theme_timer = QTimer(self)
+        self.theme_timer.setInterval(60_000)
+        self.theme_timer.timeout.connect(self.refresh_automatic_theme)
         self.build_ui()
         self.restore_settings()
-        if getattr(sys, "frozen", False):
+        if getattr(sys, "frozen", False) and "--smoke-test" not in sys.argv:
             self.apply_windows_startup_setting()
         self.cleanup_old_logs()
         self.setup_tray()
         if os.environ.get("NEON_DRIVE_DISABLE_AUTO_UPDATE") != "1":
             QTimer.singleShot(4000, self.auto_check_updates)
         self.auto_health_timer.start()
+        self.theme_timer.start()
 
     @staticmethod
     def card() -> QFrame:
@@ -1685,18 +1775,21 @@ class MainWindow(QMainWindow):
         sources.setFixedHeight(58)
         source_buttons = QHBoxLayout()
         choose_files_button = QPushButton("Выбрать файлы")
+        choose_files_button.setProperty("colorRole", "download")
         choose_files_button.setMaximumWidth(150)
         choose_files_button.setToolTip("Выбрать один или несколько файлов через Проводник")
         choose_files_button.clicked.connect(
             lambda _checked=False, selected=direction: self.choose_files_for(selected)
         )
         choose_folder_button = QPushButton("Папка")
+        choose_folder_button.setProperty("colorRole", "folder")
         choose_folder_button.setMaximumWidth(110)
         choose_folder_button.setToolTip("Выбрать папку или подключённый диск через Проводник")
         choose_folder_button.clicked.connect(
             lambda _checked=False, selected=direction: self.choose_source_folder_for(selected)
         )
         clear_button = QPushButton("×")
+        clear_button.setProperty("colorRole", "danger")
         clear_button.setMaximumWidth(46)
         clear_button.clicked.connect(sources.clear)
         source_buttons.addWidget(choose_files_button)
@@ -1762,6 +1855,7 @@ class MainWindow(QMainWindow):
         path_grid.addWidget(source_actions, 2, 0)
         start_button = QPushButton("Начать передачу")
         start_button.setObjectName("primary")
+        start_button.setProperty("colorRole", "upload" if upload else "download")
         start_button.setMinimumHeight(42)
         start_button.clicked.connect(
             lambda _checked=False, selected=direction: self.start_transfers(selected)
@@ -1829,6 +1923,11 @@ class MainWindow(QMainWindow):
         performance_header = QHBoxLayout()
         performance_header.addWidget(QLabel("Производительность", objectName="sectionTitle"))
         performance_header.addStretch()
+        rclone_monitor_button = QPushButton("Rclone ↗")
+        rclone_monitor_button.setProperty("colorRole", "monitor")
+        rclone_monitor_button.setToolTip("Открыть отдельное окно графика и терминала Rclone")
+        rclone_monitor_button.clicked.connect(self.show_rclone_monitor)
+        performance_header.addWidget(rclone_monitor_button)
         speed = QLabel("—", objectName="speed")
         performance_header.addWidget(speed)
         status_layout.addLayout(performance_header)
@@ -1911,6 +2010,7 @@ class MainWindow(QMainWindow):
         panel.direction_toggle_button = direction_toggle_button
         panel.speed_graph = speed_graph
         panel.transfer_stats_label = transfer_stats_label
+        panel.rclone_monitor_button = rclone_monitor_button
         preset_combo.currentIndexChanged.connect(
             lambda _index, selected=preset_combo: self.apply_transfer_preset(
                 str(selected.currentData() or "optimal")
@@ -1983,30 +2083,29 @@ class MainWindow(QMainWindow):
                 "slow",
                 "Медленно",
                 "Фоновая работа",
-                "2 потока · небольшие чанки · последовательная очередь",
-                "Минимальная нагрузка на сеть, диск и процессор.",
-                (("Скорость", "до 15 МБ/с"), ("Размер чанка", "16 МБ"), ("Параллельность", "2 потока"), ("Проверка", "До и после")),
+                "4 Rclone-потока · 64 МиБ · последовательная очередь",
+                "Для фоновой передачи, пока вы работаете. Меньше потоков и расход памяти; скорость зависит от сети и диска, жёсткого лимита нет.",
+                (("Скорость", "щадящий режим"), ("Размер чанка", "64 МиБ"), ("Параллельность", "4 потока"), ("Проверка", "До и после")),
             ),
             (
                 "optimal",
                 "Оптимально",
                 "Рекомендуется",
                 "8 потоков · 128 МиБ · безопасная докачка",
-                "Баланс скорости, стабильности и использования памяти.",
-                (("Скорость", "до 60 МБ/с"), ("Размер чанка", "64 МБ"), ("Параллельность", "8 потоков"), ("Проверка", "До и после")),
+                "Для ежедневных передач. Баланс скорости, стабильности и памяти; подходит для большинства подключений.",
+                (("Скорость", "баланс"), ("Размер чанка", "128 МиБ"), ("Параллельность", "8 потоков"), ("Проверка", "До и после")),
             ),
             (
                 "maximum",
                 "Максимально",
                 "Весь доступный канал",
                 "32 Rclone-потока · до 10 задач Robocopy",
-                "Максимальная скорость для больших файлов и быстрого диска.",
-                (("Скорость", "без лимита"), ("Размер чанка", "128 МБ"), ("Параллельность", "16–32 потока"), ("Проверка", "До и после")),
+                "Для больших файлов, быстрого SSD и свободного канала. Повышенный расход RAM; скорость всё равно ограничена сетью, диском и сервисом.",
+                (("Скорость", "без лимита"), ("Размер чанка", "512 МиБ"), ("Параллельность", "32 потока"), ("Проверка", "До и после")),
             ),
         )
         for key, name, badge, details, description, specs in profiles:
-            card = self.card()
-            card.setObjectName("profileCard")
+            card = ProfileCard(key)
             card.setMinimumWidth(0)
             box = QVBoxLayout(card)
             box.setContentsMargins(20, 20, 20, 20)
@@ -2043,10 +2142,10 @@ class MainWindow(QMainWindow):
                 spec_row = QHBoxLayout()
                 spec_label = QLabel(spec_name, objectName="settingDescription")
                 spec_data = QLabel(spec_value, objectName="profileValue")
-                spec_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-                spec_data.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-                spec_row.addWidget(spec_label)
-                spec_row.addStretch()
+                spec_label.setWordWrap(True)
+                spec_data.setWordWrap(True)
+                spec_data.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                spec_row.addWidget(spec_label, 1)
                 spec_row.addWidget(spec_data)
                 box.addLayout(spec_row)
             box.addStretch()
@@ -2192,9 +2291,11 @@ class MainWindow(QMainWindow):
         speed_card, speed_box = self.settings_section("ДВИЖОК И ПРОИЗВОДИТЕЛЬНОСТЬ")
         speed_box.addWidget(QLabel("Движок копирования"))
         self.copy_engine_combo = QComboBox()
-        self.copy_engine_combo.addItem("Robocopy · встроен в Windows", "robocopy")
+        if not is_macos():
+            self.copy_engine_combo.addItem("Robocopy · встроен в Windows", "robocopy")
         self.copy_engine_combo.addItem("Rclone · чанки и несколько потоков", "rclone")
-        self.copy_engine_combo.addItem("Совместный · Rclone для файлов, Robocopy для папок", "hybrid")
+        if not is_macos():
+            self.copy_engine_combo.addItem("Совместный · Rclone для файлов, Robocopy для папок", "hybrid")
         speed_box.addWidget(self.copy_engine_combo)
         self.engine_status = QLabel()
         self.engine_status.setObjectName("engineStatus")
@@ -2203,7 +2304,7 @@ class MainWindow(QMainWindow):
         rclone_path_row = QHBoxLayout()
         self.rclone_path_edit = QLineEdit()
         self.rclone_path_edit.setPlaceholderText("Встроенный Rclone выбирается автоматически")
-        browse_rclone_button = QPushButton("Выбрать rclone.exe…")
+        browse_rclone_button = QPushButton("Выбрать Rclone…")
         browse_rclone_button.clicked.connect(self.browse_rclone_executable)
         self.download_rclone_button = QPushButton("Переустановить Rclone")
         self.download_rclone_button.setObjectName("primarySmall")
@@ -2375,10 +2476,16 @@ class MainWindow(QMainWindow):
             behavior_box, "После завершения передачи оставлять Neon открытым в tray"
         )
         self.windows_startup_check = self.add_setting_toggle(
-            behavior_box, "Запускать Neon Drive при входе в Windows"
+            behavior_box,
+            "Запускать Neon Drive при входе в macOS"
+            if is_macos()
+            else "Запускать Neon Drive при входе в Windows",
         )
         self.notifications_check = self.add_setting_toggle(
-            behavior_box, "Windows-уведомление после завершения"
+            behavior_box,
+            "Системное уведомление после завершения"
+            if is_macos()
+            else "Windows-уведомление после завершения",
         )
         behavior_note = QLabel("Уведомление автоматически исчезнет через несколько секунд.")
         behavior_note.setObjectName("settingDescription")
@@ -2413,6 +2520,9 @@ class MainWindow(QMainWindow):
         logs_box.addWidget(self.log_retention_controls)
         self.smart_terminal_check = self.add_setting_toggle(
             logs_box, "Не прокручивать терминал вниз, если читаю старые строки"
+        )
+        self.auto_rclone_monitor_check = self.add_setting_toggle(
+            logs_box, "Автоматически открывать отдельный монитор при запуске Rclone"
         )
         grid.addWidget(logs_card, 1, 1)
 
@@ -2673,11 +2783,15 @@ class MainWindow(QMainWindow):
         theme_card, theme_box = self.settings_section("ТЕМА ПРИЛОЖЕНИЯ")
         theme_box.addWidget(QLabel("Основная тема"))
         self.theme_combo = QComboBox()
+        self.theme_combo.addItem("Автоматически · светлая днём, тёмная ночью", "automatic")
         self.theme_combo.addItem("Светлая тема", "light")
         self.theme_combo.addItem("Google Drive · приглушённая", "google_drive")
         self.theme_combo.addItem("Тёмная тема", "dark")
         self.theme_combo.addItem("Чёрный OLED", "oled")
         theme_box.addWidget(self.theme_combo)
+        self.automatic_theme_note = QLabel()
+        self.automatic_theme_note.setObjectName("settingDescription")
+        theme_box.addWidget(self.automatic_theme_note)
         theme_box.addWidget(QLabel("Цвет кнопок и акцентов"))
         accent_row = QHBoxLayout()
         self.accent_combo = QComboBox()
@@ -2693,6 +2807,9 @@ class MainWindow(QMainWindow):
         theme_box.addLayout(accent_row)
         self.accent_all_buttons_check = self.add_setting_toggle(
             theme_box, "Красить выбранным цветом все основные кнопки"
+        )
+        self.contextual_buttons_check = self.add_setting_toggle(
+            theme_box, "Разноцветные кнопки по назначению действия"
         )
         grid.addWidget(theme_card, 3, 0)
 
@@ -3162,8 +3279,35 @@ class MainWindow(QMainWindow):
         self.transfer_stats.set_auto_monthly_reset(enabled)
         self.refresh_transfer_stats_ui()
 
+    @staticmethod
+    def automatic_theme_for_hour(hour: int) -> str:
+        return "light" if 7 <= int(hour) < 19 else "dark"
+
+    def refresh_automatic_theme(self) -> None:
+        if hasattr(self, "theme_combo") and self.theme_combo.currentData() == "automatic":
+            if self.automatic_theme_for_hour(datetime.now().hour) != getattr(self, "_applied_theme", None):
+                self.apply_theme()
+
     def apply_theme(self) -> None:
-        theme = self.theme_combo.currentData() if hasattr(self, "theme_combo") else "light"
+        selected_theme = (
+            self.theme_combo.currentData() if hasattr(self, "theme_combo") else "light"
+        )
+        theme = (
+            self.automatic_theme_for_hour(datetime.now().hour)
+            if selected_theme == "automatic"
+            else selected_theme
+        )
+        self._applied_theme = theme
+        if hasattr(self, "automatic_theme_note"):
+            if selected_theme == "automatic":
+                label = "светлая" if theme == "light" else "тёмная"
+                self.automatic_theme_note.setText(
+                    f"Сейчас активна {label} тема · переключение в 07:00 и 19:00."
+                )
+            else:
+                self.automatic_theme_note.setText(
+                    "Автоматический режим использует светлую тему с 07:00 до 19:00."
+                )
         design = (
             self.design_mode_combo.currentData()
             if hasattr(self, "design_mode_combo")
@@ -3261,6 +3405,10 @@ class MainWindow(QMainWindow):
         all_buttons = bool(
             hasattr(self, "accent_all_buttons_check") and self.accent_all_buttons_check.isChecked()
         ) and not drive_theme
+        contextual_buttons = bool(
+            hasattr(self, "contextual_buttons_check")
+            and self.contextual_buttons_check.isChecked()
+        )
         sidebar_background = colors["card"] if light_theme else "#08131f"
         selected_surface = (
             "#d2e3fc" if drive_theme else
@@ -3314,6 +3462,12 @@ class MainWindow(QMainWindow):
             #statusCard {{ border-color: {accent_color.darker(190).name()}; }}
             #fileRow:hover {{ border-color: {accent}; }}
             #profileCard:hover {{ border-color: {accent}; background: {colors['input']}; }}
+            #profileCard[profileKey="slow"]:hover {{ border: 2px solid #34a853; background: {colors['input']}; }}
+            #profileCard[profileKey="optimal"]:hover {{ border: 2px solid #f9ab00; background: {colors['input']}; }}
+            #profileCard[profileKey="maximum"]:hover {{ border: 2px solid #ea4335; background: {colors['input']}; }}
+            #profileCard[profileKey="slow"] #profileValue {{ color: #34a853; }}
+            #profileCard[profileKey="optimal"] #profileValue {{ color: #f9ab00; }}
+            #profileCard[profileKey="maximum"] #profileValue {{ color: #ea4335; }}
             #profileTitle {{ color: {colors['text']}; font-size: {metrics['title']}px; font-weight: 800; }}
             #profileValue {{ color: {accent}; font-weight: 800; }}
             #transferArrow {{ color: {accent}; font-size: 34px; font-weight: 400; }}
@@ -3414,6 +3568,25 @@ class MainWindow(QMainWindow):
                     background: #1a73e8; color: #ffffff; border-color: #185abc;
                 }
             """
+        if contextual_buttons:
+            stylesheet += """
+                QPushButton[colorRole="download"], QPushButton#primary[colorRole="download"] {
+                    background: #1a73e8; color: #ffffff; border-color: #185abc;
+                }
+                QPushButton[colorRole="upload"], QPushButton#primary[colorRole="upload"] {
+                    background: #34a853; color: #ffffff; border-color: #188038;
+                }
+                QPushButton[colorRole="folder"] {
+                    background: #f9ab00; color: #202124; border-color: #e69500;
+                }
+                QPushButton[colorRole="danger"] {
+                    background: #ea4335; color: #ffffff; border-color: #c5221f;
+                }
+                QPushButton[colorRole="monitor"] {
+                    background: #9c27b0; color: #ffffff; border-color: #7b1fa2;
+                }
+                QPushButton[colorRole]:hover { border-color: #ffffff; color: #ffffff; }
+            """
         application = QApplication.instance()
         if application is not None:
             if application.styleSheet() != stylesheet:
@@ -3431,6 +3604,8 @@ class MainWindow(QMainWindow):
                 row.progress.animations_enabled = animations
         for row in getattr(self, "files_overview_rows", {}).values():
             row.progress.animations_enabled = animations
+        if self.rclone_monitor is not None:
+            self.rclone_monitor.graph.set_colors(accent)
 
     def restore_settings(self) -> None:
         def select(combo: QComboBox, value) -> None:
@@ -3471,7 +3646,10 @@ class MainWindow(QMainWindow):
             if dashboard_migrated
             else "auto",
         )
-        select(self.copy_engine_combo, self.settings.value("copy_engine", "robocopy"))
+        select(
+            self.copy_engine_combo,
+            self.settings.value("copy_engine", "rclone" if is_macos() else "robocopy"),
+        )
         self.rclone_path_edit.setText(str(self.settings.value("rclone_path", "")))
         select(self.download_mode_combo, self.settings.value(
             "download_mode", "all" if old_parallel else "sequential"
@@ -3531,6 +3709,9 @@ class MainWindow(QMainWindow):
         self.accent_all_buttons_check.setChecked(
             self.settings.value("accent_all_buttons", False, type=bool)
         )
+        self.contextual_buttons_check.setChecked(
+            self.settings.value("contextual_buttons", False, type=bool)
+        )
         self.animations_check.setChecked(self.settings.value("animations", True, type=bool))
         self.monthly_stats_reset_check.setChecked(
             self.transfer_stats.auto_monthly_reset_enabled()
@@ -3558,6 +3739,9 @@ class MainWindow(QMainWindow):
         self.auto_start_check.setChecked(self.settings.value("auto_start", False, type=bool))
         self.smart_terminal_check.setChecked(
             self.settings.value("smart_terminal", True, type=bool)
+        )
+        self.auto_rclone_monitor_check.setChecked(
+            self.settings.value("auto_rclone_monitor", True, type=bool)
         )
         self.cleanup_logs_check.setChecked(
             self.settings.value("cleanup_logs", True, type=bool)
@@ -3604,6 +3788,7 @@ class MainWindow(QMainWindow):
             self.design_mode_combo.currentIndexChanged,
             self.accent_combo.currentIndexChanged,
             self.accent_all_buttons_check.stateChanged,
+            self.contextual_buttons_check.stateChanged,
             self.animations_check.stateChanged,
             self.monthly_stats_reset_check.stateChanged,
             self.update_mode_combo.currentIndexChanged,
@@ -3615,6 +3800,7 @@ class MainWindow(QMainWindow):
             self.notifications_check.stateChanged,
             self.auto_start_check.stateChanged,
             self.smart_terminal_check.stateChanged,
+            self.auto_rclone_monitor_check.stateChanged,
             self.cleanup_logs_check.stateChanged,
             self.log_retention_combo.currentIndexChanged,
         ):
@@ -3684,6 +3870,7 @@ class MainWindow(QMainWindow):
         self.settings.setValue("design_mode", self.design_mode_combo.currentData())
         self.settings.setValue("accent_color", self.accent_color)
         self.settings.setValue("accent_all_buttons", self.accent_all_buttons_check.isChecked())
+        self.settings.setValue("contextual_buttons", self.contextual_buttons_check.isChecked())
         self.settings.setValue("animations", self.animations_check.isChecked())
         self.settings.setValue("update_mode", self.update_mode_combo.currentData())
         self.settings.setValue("tray_enabled", self.tray_check.isChecked())
@@ -3698,6 +3885,9 @@ class MainWindow(QMainWindow):
         self.settings.setValue("notifications", self.notifications_check.isChecked())
         self.settings.setValue("auto_start", self.auto_start_check.isChecked())
         self.settings.setValue("smart_terminal", self.smart_terminal_check.isChecked())
+        self.settings.setValue(
+            "auto_rclone_monitor", self.auto_rclone_monitor_check.isChecked()
+        )
         self.settings.setValue("cleanup_logs", self.cleanup_logs_check.isChecked())
         self.settings.setValue("log_retention_days", self.log_retention_combo.currentData())
         self.settings.setValue("destination", self.destination.text())
@@ -3731,13 +3921,24 @@ class MainWindow(QMainWindow):
                 self.rclone_performance_combo.blockSignals(False)
         self.update_rclone_performance_note()
         if sender is self.copy_engine_combo:
-            engine = str(self.copy_engine_combo.currentData() or "robocopy")
+            engine = str(
+                self.copy_engine_combo.currentData()
+                or ("rclone" if is_macos() else "robocopy")
+            )
             if engine in ("rclone", "hybrid"):
                 sequential = self.download_mode_combo.findData("sequential")
                 if sequential >= 0:
                     self.download_mode_combo.setCurrentIndex(sequential)
         if sender is self.accent_combo:
             self.accent_color = str(self.accent_combo.currentData())
+        if sender is self.contextual_buttons_check and self.contextual_buttons_check.isChecked():
+            self.accent_all_buttons_check.blockSignals(True)
+            self.accent_all_buttons_check.setChecked(False)
+            self.accent_all_buttons_check.blockSignals(False)
+        elif sender is self.accent_all_buttons_check and self.accent_all_buttons_check.isChecked():
+            self.contextual_buttons_check.blockSignals(True)
+            self.contextual_buttons_check.setChecked(False)
+            self.contextual_buttons_check.blockSignals(False)
         if sender is self.monthly_stats_reset_check:
             self.set_monthly_transfer_stats_reset(
                 self.monthly_stats_reset_check.isChecked()
@@ -3763,7 +3964,7 @@ class MainWindow(QMainWindow):
             arguments = [str(Path(sys.executable).resolve()), "--startup"]
         else:
             arguments = [sys.executable, str(resource_path("main.py")), "--startup"]
-        return subprocess.list2cmdline(arguments)
+        return shlex.join(arguments) if is_macos() else subprocess.list2cmdline(arguments)
 
     def apply_windows_startup_setting(self) -> None:
         enabled = self.windows_startup_check.isChecked()
@@ -3776,7 +3977,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(
                 self,
                 APP_NAME,
-                f"Не удалось изменить автозапуск Windows:\n{exc}",
+                f"Не удалось изменить автозапуск системы:\n{exc}",
             )
 
     @staticmethod
@@ -4078,11 +4279,16 @@ class MainWindow(QMainWindow):
             self.refresh_files_overview()
 
     def browse_rclone_executable(self) -> None:
+        file_filter = (
+            "Rclone (rclone);;Исполняемые файлы (*)"
+            if is_macos()
+            else "rclone.exe (rclone.exe);;Программы (*.exe);;Все файлы (*)"
+        )
         selected, _ = QFileDialog.getOpenFileName(
             self,
-            "Выберите rclone.exe",
+            "Выберите Rclone",
             self.rclone_path_edit.text().strip(),
-            "rclone.exe (rclone.exe);;Программы (*.exe);;Все файлы (*)",
+            file_filter,
         )
         if selected:
             self.rclone_path_edit.setText(selected)
@@ -4404,14 +4610,21 @@ class MainWindow(QMainWindow):
         bundled = bundled_rclone_path()
         if bundled:
             return str(bundled)
-        return shutil.which("rclone.exe") or shutil.which("rclone")
+        return (
+            shutil.which("rclone")
+            if is_macos()
+            else shutil.which("rclone.exe") or shutil.which("rclone")
+        )
 
     def refresh_engine_status(self) -> None:
         if not hasattr(self, "engine_status"):
             return
-        robocopy_ready = bool(shutil.which("robocopy.exe"))
+        robocopy_ready = False if is_macos() else bool(shutil.which("robocopy.exe"))
         rclone_path = self.resolved_rclone_executable()
-        engine = str(self.copy_engine_combo.currentData() or "robocopy")
+        engine = str(
+            self.copy_engine_combo.currentData()
+            or ("rclone" if is_macos() else "robocopy")
+        )
         required_ready = robocopy_ready if engine == "robocopy" else bool(rclone_path)
         if engine == "hybrid":
             required_ready = robocopy_ready and bool(rclone_path)
@@ -4424,7 +4637,9 @@ class MainWindow(QMainWindow):
             else Path(rclone_path).name if rclone_path else "не найден"
         )
         self.engine_status.setText(
-            f"Robocopy: {robo_text}   ·   Rclone: {rclone_text}"
+            f"macOS · Rclone: {rclone_text}"
+            if is_macos()
+            else f"Robocopy: {robo_text}   ·   Rclone: {rclone_text}"
         )
         if hasattr(self, "download_rclone_button") and self.rclone_install_thread is None:
             self.download_rclone_button.setText("Переустановить Rclone")
@@ -4919,6 +5134,14 @@ class MainWindow(QMainWindow):
     def start_uploads(self) -> None:
         self.start_transfers("upload")
 
+    def show_rclone_monitor(self) -> None:
+        if self.rclone_monitor is None:
+            self.rclone_monitor = RcloneMonitorWindow(self)
+            self.apply_theme()
+        self.rclone_monitor.show()
+        self.rclone_monitor.raise_()
+        self.rclone_monitor.activateWindow()
+
     def start_transfers(self, direction: str) -> None:
         if self.running or self.workers:
             return
@@ -5007,6 +5230,7 @@ class MainWindow(QMainWindow):
             storage_summary = f"Свободно: {human_size(usage.free)} из {human_size(usage.total)}"
         engine_mode = str(self.copy_engine_combo.currentData() or "robocopy")
         required_engines = {copy_engine_for_source(engine_mode, item) for item in items}
+        self.active_engines = required_engines
         robocopy = shutil.which("robocopy.exe") if "robocopy" in required_engines else None
         rclone = self.resolved_rclone_executable() if "rclone" in required_engines else None
         missing_engines: list[str] = []
@@ -5061,6 +5285,13 @@ class MainWindow(QMainWindow):
         self.paused = False
         self.running = True
         panel.terminal.clear()
+        if "rclone" in required_engines:
+            if self.rclone_monitor is None:
+                self.rclone_monitor = RcloneMonitorWindow(self)
+                self.apply_theme()
+            self.rclone_monitor.reset_monitor()
+            if self.auto_rclone_monitor_check.isChecked():
+                self.show_rclone_monitor()
         self.log_path = self.log_dir / f"session-{datetime.now():%Y%m%d-%H%M%S}.log"
         self.set_inputs_enabled(False)
         self.set_transfer_controls_enabled(True)
@@ -5321,6 +5552,8 @@ class MainWindow(QMainWindow):
         panel = self.current_transfer_panel()
         if hasattr(panel, "speed_graph"):
             panel.speed_graph.setValue(self.speed_bps / (1024 * 1024))
+        if self.rclone_monitor is not None and "rclone" in self.active_engines:
+            self.rclone_monitor.set_speed(self.speed_bps / (1024 * 1024))
         if self.speed_bps > 0:
             self.speed.setText(f"{self.speed_bps / (1024 * 1024):.1f} МБ/с")
             remaining = max(0, self.total_bytes - self.measured_done_bytes)
@@ -5561,6 +5794,8 @@ class MainWindow(QMainWindow):
             self.global_system_status.setText(text.replace("ГОТОВО", "СИСТЕМА ГОТОВА"))
         if hasattr(self, "header_ready_badge"):
             self.header_ready_badge.setText(text.replace("СИСТЕМА ", "").title())
+        if self.rclone_monitor is not None:
+            self.rclone_monitor.state_label.setText(text)
         self.animate_appearance(
             self.state_label,
             duration=200,
@@ -5587,6 +5822,8 @@ class MainWindow(QMainWindow):
             scroll.setValue(scroll.maximum())
         else:
             scroll.setValue(old_position)
+        if self.rclone_monitor is not None and "rclone" in self.active_engines:
+            self.rclone_monitor.append_text(text)
 
     def open_logs(self) -> None:
         self.log_dir.mkdir(parents=True, exist_ok=True)
@@ -5874,6 +6111,7 @@ class MainWindow(QMainWindow):
             return
         if self.force_exit:
             self.auto_health_timer.stop()
+            self.theme_timer.stop()
             event.accept()
             return
         if (
@@ -5912,6 +6150,7 @@ class MainWindow(QMainWindow):
             self.maybe_close_when_idle()
             return
         self.auto_health_timer.stop()
+        self.theme_timer.stop()
         event.accept()
 
     def resizeEvent(self, event) -> None:  # noqa: N802
@@ -5949,6 +6188,13 @@ def main() -> int:
     icon_path = resource_path("assets/neon-drive-v2.png")
     if icon_path.is_file():
         app.setWindowIcon(QIcon(str(icon_path)))
+    if not macos_version_supported(11):
+        QMessageBox.critical(
+            None,
+            APP_NAME,
+            "Neon Drive требует macOS 11 Big Sur или новее.",
+        )
+        return 2
 
     def report_unhandled(exc_type, exc_value, exc_tb) -> None:
         details = "".join(traceback.format_exception(exc_type, exc_value, exc_tb))
@@ -5976,7 +6222,7 @@ def main() -> int:
         return window.handle_agent_request(request)
 
     instance_server = InstanceServer(dispatch, app)
-    if not instance_server.listen():
+    if "--smoke-test" not in sys.argv and not instance_server.listen():
         send_request({"command": "activate"}, timeout_ms=1800)
         return 0
 

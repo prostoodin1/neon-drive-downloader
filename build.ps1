@@ -4,7 +4,7 @@ $python = if (Test-Path ".venv\Scripts\python.exe") { ".venv\Scripts\python.exe"
 
 & $python -m pip install -r requirements.txt
 if ($LASTEXITCODE -ne 0) { throw "Dependency installation failed." }
-& $python -m unittest discover -s tests
+& $python scripts/run_tests.py
 if ($LASTEXITCODE -ne 0) { throw "Tests failed." }
 & $python scripts\fetch_rclone.py
 if ($LASTEXITCODE -ne 0) { throw "Bundled Rclone preparation failed." }

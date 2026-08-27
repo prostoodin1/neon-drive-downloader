@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import json
+import sys
 from collections.abc import Callable
 
-from PySide6.QtCore import QObject
+from PySide6.QtCore import QObject, QLockFile
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
+
+from .platform_support import app_data_directory
 
 
 SERVER_NAME = "NeonDrive.v13"
@@ -40,8 +43,24 @@ class InstanceServer(QObject):
         self.server.setSocketOptions(QLocalServer.SocketOption.UserAccessOption)
         self._buffers: dict[QLocalSocket, bytearray] = {}
         self.server.newConnection.connect(self._accept_connections)
+        self._instance_lock: QLockFile | None = None
 
     def listen(self) -> bool:
+        if sys.platform == "darwin":
+            # Unix socket files can survive a crash. A process-lifetime lock makes
+            # stale-socket removal safe even during simultaneous launches.
+            directory = app_data_directory()
+            directory.mkdir(parents=True, exist_ok=True)
+            lock = QLockFile(str(directory / "instance.lock"))
+            lock.setStaleLockTime(0)
+            if not lock.tryLock(0):
+                return False
+            self._instance_lock = lock
+            QLocalServer.removeServer(SERVER_NAME)
+            if self.server.listen(SERVER_NAME):
+                return True
+            lock.unlock()
+            return False
         if self.server.listen(SERVER_NAME):
             return True
         # Windows named pipes disappear with their owner. Failing closed here avoids

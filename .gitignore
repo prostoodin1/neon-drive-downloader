@@ -11,6 +11,7 @@ dist/
 !NeonDriveDownloader-OneFile.spec
 !NeonDriveInstaller.spec
 vendor/rclone/rclone.exe
+vendor/rclone/rclone
 vendor/rclone/install.json
 
 # Local application and Codex artifacts

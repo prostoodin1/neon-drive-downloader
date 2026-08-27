@@ -27,17 +27,23 @@ def release_payload(tag: str, assets: list[str], prerelease: bool = False) -> di
 
 
 class UpdaterTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # Windows fixtures stay deterministic on macOS; native cases override this.
+        platform_patch = patch.object(updater, "is_macos", return_value=False)
+        platform_patch.start()
+        self.addCleanup(platform_patch.stop)
+
     def test_beta_update_check_includes_newer_prereleases(self) -> None:
         releases = [
             release_payload("v5.5.0-beta.4", [updater.SETUP_ASSET_NAME], prerelease=True),
-            release_payload("v5.5.0-beta.6", [updater.SETUP_ASSET_NAME], prerelease=True),
+            release_payload("v5.5.0-beta.7", [updater.SETUP_ASSET_NAME], prerelease=True),
             release_payload("v5.4.0", [updater.SETUP_ASSET_NAME]),
         ]
         with patch.object(updater, "_release_data", return_value=(releases, "public")) as lookup:
             release = updater.latest_release()
 
         lookup.assert_called_once_with(latest=False)
-        self.assertEqual(release["version"], "5.5.0-beta.6")
+        self.assertEqual(release["version"], "5.5.0-beta.7")
         self.assertTrue(release["available"])
 
     def test_public_release_lookup_never_requires_github_login(self) -> None:
@@ -106,6 +112,27 @@ class UpdaterTests(unittest.TestCase):
         self.assertEqual(release["asset_name"], updater.SETUP_ASSET_NAME)
         self.assertTrue(release["available"])
 
+    def test_macos_release_selects_dmg_instead_of_windows_installer(self) -> None:
+        with patch.object(updater, "is_macos", return_value=True):
+            release = updater._normalize_release(
+                release_payload(
+                    "v99.0.0",
+                    [updater.SETUP_ASSET_NAME, updater.MACOS_ASSET_NAME],
+                ),
+                "public",
+            )
+        self.assertEqual(release["asset_name"], updater.MACOS_ASSET_NAME)
+
+    def test_macos_update_opens_dmg_without_powershell(self) -> None:
+        with (
+            patch.object(updater, "is_macos", return_value=True),
+            patch.object(updater.sys, "frozen", True, create=True),
+            patch.object(updater.subprocess, "Popen") as popen,
+        ):
+            downloaded = Path(updater.MACOS_ASSET_NAME)
+            updater.launch_replacement(downloaded, Path("NeonDriveDownloader"))
+        self.assertEqual(popen.call_args.args[0], ["open", str(downloaded)])
+
     def test_history_accepts_previous_setup_filename(self) -> None:
         release = updater._normalize_release(
             release_payload("v5.4.0-beta.13", [updater.PREVIOUS_SETUP_ASSET_NAME]),
@@ -118,7 +145,7 @@ class UpdaterTests(unittest.TestCase):
     def test_same_version_offers_migration_from_onefile(self) -> None:
         with (
             patch.object(updater.sys, "frozen", True, create=True),
-            patch.object(updater.sys, "_MEIPASS", r"C:\Temp\_MEI123456", create=True),
+            patch.object(updater.sys, "_MEIPASS", str(Path("temp") / "_MEI123456"), create=True),
         ):
             release = updater._normalize_release(
                 release_payload(f"v{__version__}", [updater.SETUP_ASSET_NAME]),

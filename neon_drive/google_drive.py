@@ -6,6 +6,8 @@ import os
 import re
 from pathlib import Path
 
+from .platform_support import app_data_directory
+
 
 GOOGLE_DRIVE_REMOTE = "NeonGoogleDrive"
 GOOGLE_DRIVE_ROOT = f"{GOOGLE_DRIVE_REMOTE}:"
@@ -22,8 +24,7 @@ def managed_rclone_config_path() -> Path:
     override = os.environ.get("NEON_DRIVE_RCLONE_CONFIG")
     if override:
         return Path(override).expanduser()
-    local_app_data = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
-    return local_app_data / "NeonDriveDownloader" / "rclone" / "rclone.conf"
+    return app_data_directory() / "rclone" / "rclone.conf"
 
 
 def oauth_completion_template_path() -> Path:

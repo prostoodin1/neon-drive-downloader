@@ -13,9 +13,17 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Download and verify the Rclone bundled with Neon Drive.")
     parser.add_argument("--destination", default="vendor/rclone")
     parser.add_argument("--force", action="store_true")
+    parser.add_argument("--platform", choices=("windows", "osx"))
+    parser.add_argument("--arch", choices=("amd64", "arm64"))
     args = parser.parse_args()
     destination = Path(args.destination).resolve()
-    executable = destination / "rclone.exe"
+    if args.platform:
+        os.environ["NEON_DRIVE_RCLONE_PLATFORM"] = args.platform
+    if args.arch:
+        os.environ["NEON_DRIVE_RCLONE_ARCH"] = args.arch
+    target_platform = args.platform or ("osx" if sys.platform == "darwin" else "windows")
+    executable_name = "rclone.exe" if target_platform == "windows" else "rclone"
+    executable = destination / executable_name
     metadata = destination / "install.json"
     if executable.is_file() and metadata.is_file() and not args.force:
         print(f"Bundled Rclone already exists: {executable}")

@@ -5,6 +5,8 @@ import os
 import urllib.request
 from pathlib import Path
 
+from .platform_support import app_data_directory
+
 
 REPOSITORY = "prostoodin1/neon-drive-downloader"
 UPLOAD_ADDON_ID = "neon-uploader"
@@ -20,8 +22,7 @@ def addon_directory() -> Path:
     override = os.environ.get("NEON_DRIVE_ADDON_DIR")
     if override:
         return Path(override).expanduser()
-    base = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
-    return base / "NeonDriveDownloader" / "addons"
+    return app_data_directory() / "addons"
 
 
 def upload_addon_path() -> Path:

@@ -25,7 +25,49 @@ def rclone_archive(payload: bytes = b"MZ-neon-rclone") -> bytes:
     return output.getvalue()
 
 
+def macos_rclone_archive(payload: bytes = b"\xcf\xfa\xed\xfe-neon-rclone") -> bytes:
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as package:
+        package.writestr("rclone-v1.2.3-osx-amd64/rclone", payload)
+    return output.getvalue()
+
+
 class RcloneManagerTests(unittest.TestCase):
+    def test_macos_archive_is_verified_and_installed_as_executable(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            archive = macos_rclone_archive()
+            filename = "rclone-v1.2.3-osx-amd64.zip"
+            responses = {
+                rclone_manager.VERSION_URL: b"rclone v1.2.3\n",
+                f"{rclone_manager.DOWNLOADS_ROOT}/v1.2.3/SHA256SUMS": (
+                    f"{hashlib.sha256(archive).hexdigest()}  {filename}\n".encode()
+                ),
+                f"{rclone_manager.DOWNLOADS_ROOT}/v1.2.3/{filename}": archive,
+            }
+
+            def open_url(request, timeout=0):
+                return FakeResponse(responses[request.full_url])
+
+            with (
+                patch.dict(
+                    os.environ,
+                    {
+                        "NEON_DRIVE_RCLONE_DIR": temp_dir,
+                        "NEON_DRIVE_RCLONE_PLATFORM": "osx",
+                        "NEON_DRIVE_RCLONE_ARCH": "amd64",
+                    },
+                ),
+                patch.object(rclone_manager, "is_macos", return_value=True),
+                patch.object(rclone_manager.urllib.request, "urlopen", side_effect=open_url),
+            ):
+                path, version = rclone_manager.download_and_install_rclone()
+
+            self.assertEqual(version, "v1.2.3")
+            self.assertEqual(path.name, "rclone")
+            self.assertEqual(path.read_bytes(), b"\xcf\xfa\xed\xfe-neon-rclone")
+            if os.name != "nt":
+                self.assertTrue(path.stat().st_mode & 0o100)
+
     def test_locked_executable_has_clear_error(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temporary = Path(temp_dir) / "rclone.download"

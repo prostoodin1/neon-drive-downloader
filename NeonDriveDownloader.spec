@@ -1,10 +1,16 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+import os
+import sys
+
+
+rclone_name = 'rclone.exe' if os.name == 'nt' else 'rclone'
+app_icon = ['assets/neon-drive-v2.ico'] if os.name == 'nt' else None
 
 a = Analysis(
     ['main.py'],
     pathex=[],
-    binaries=[('vendor/rclone/rclone.exe', 'tools')],
+    binaries=[(f'vendor/rclone/{rclone_name}', 'tools')],
     datas=[
         ('assets/neon-drive-v2.png', 'assets'),
         ('vendor/rclone/install.json', 'tools'),
@@ -36,7 +42,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=['assets/neon-drive-v2.ico'],
+    icon=app_icon,
 )
 
 cli = Analysis(
@@ -70,7 +76,7 @@ cli_exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=['assets/neon-drive-v2.ico'],
+    icon=app_icon,
 )
 
 coll = COLLECT(
@@ -85,3 +91,15 @@ coll = COLLECT(
     upx_exclude=[],
     name='NeonDriveDownloader',
 )
+
+if sys.platform == 'darwin':
+    app = BUNDLE(
+        coll,
+        name='Neon Drive.app',
+        icon=None,
+        bundle_identifier='com.neontools.neondrive',
+        info_plist={
+            'LSMinimumSystemVersion': '11.0',
+            'NSHighResolutionCapable': True,
+        },
+    )
