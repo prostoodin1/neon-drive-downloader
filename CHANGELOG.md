@@ -2,9 +2,11 @@
 
 ## 5.5.0-beta.6
 
-- Added a macOS application and DMG release build with macOS 11 Big Sur as the
+- Added a macOS application and DMG release build with macOS 12 Monterey as the
   minimum target, platform-native application data paths, Finder integration,
   bundled Rclone, and login startup through a LaunchAgent.
+- The requested macOS 11 target is not supported by current official Rclone binaries;
+  the application reports the correct macOS 12 minimum instead of failing during transfers.
 - Added a separate Rclone monitor window with a live speed graph, current state,
   and full terminal output; it can open automatically when an Rclone transfer starts.
 - Added green, yellow, and red hover borders and soft glows to the Slow, Optimal,

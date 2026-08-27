@@ -6188,11 +6188,11 @@ def main() -> int:
     icon_path = resource_path("assets/neon-drive-v2.png")
     if icon_path.is_file():
         app.setWindowIcon(QIcon(str(icon_path)))
-    if not macos_version_supported(11):
+    if not macos_version_supported(12):
         QMessageBox.critical(
             None,
             APP_NAME,
-            "Neon Drive требует macOS 11 Big Sur или новее.",
+            "Neon Drive со встроенным Rclone требует macOS 12 Monterey или новее.",
         )
         return 2
 

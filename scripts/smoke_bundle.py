@@ -34,6 +34,10 @@ def main() -> int:
                 raise RuntimeError(f"{name} exited with {result.returncode}")
         if list((Path(temp) / "data").rglob("crash-*.log")):
             raise RuntimeError("Application generated a crash log")
+        rclone = next(bundle.rglob("rclone" + suffix), None)
+        if rclone is None:
+            raise RuntimeError("Bundled Rclone is missing")
+        subprocess.run([str(rclone), "version"], env=env, timeout=15, check=True, creationflags=flags)
         print("Packaged GUI and hidden CLI smoke tests passed.")
     return 0
 

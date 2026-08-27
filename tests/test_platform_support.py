@@ -39,11 +39,13 @@ class PlatformSupportTests(unittest.TestCase):
         ):
             self.assertEqual(platform_support.rclone_package_platform(), ("osx", "amd64"))
 
-    def test_macos_11_is_minimum_supported_version(self) -> None:
+    def test_macos_12_is_minimum_supported_version(self) -> None:
         with patch.object(platform_support, "is_macos", return_value=True):
             with patch.object(platform_support.platform, "mac_ver", return_value=(("10.15.7"), (), "")):
                 self.assertFalse(platform_support.macos_version_supported())
             with patch.object(platform_support.platform, "mac_ver", return_value=(("11.0"), (), "")):
+                self.assertFalse(platform_support.macos_version_supported())
+            with patch.object(platform_support.platform, "mac_ver", return_value=(("12.0"), (), "")):
                 self.assertTrue(platform_support.macos_version_supported())
 
 

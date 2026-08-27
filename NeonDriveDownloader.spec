@@ -104,7 +104,7 @@ if sys.platform == 'darwin':
         icon=None,
         bundle_identifier='com.neontools.neondrive',
         info_plist={
-            'LSMinimumSystemVersion': '11.0',
+            'LSMinimumSystemVersion': '12.0',
             'NSHighResolutionCapable': True,
         },
     )

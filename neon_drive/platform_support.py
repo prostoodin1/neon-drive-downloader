@@ -38,7 +38,7 @@ def rclone_package_platform() -> tuple[str, str]:
     return target_platform, target_arch
 
 
-def macos_version_supported(minimum_major: int = 11) -> bool:
+def macos_version_supported(minimum_major: int = 12) -> bool:
     if not is_macos():
         return True
     try:

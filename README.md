@@ -95,7 +95,8 @@ Neon Drive со встроенными Rclone и скрытым `NeonDriveCLI.ex
 больше не создаются.
 
 Для macOS GitHub Actions создаёт `NeonDrive-macOS-x64.dmg`. Минимальная система —
-macOS 11 Big Sur; на Apple Silicon Intel-сборка запускается через Rosetta 2.
+macOS 12 Monterey (минимум актуального Rclone); на Apple Silicon Intel-сборка
+запускается через Rosetta 2.
 
 ## Как использовать
 
