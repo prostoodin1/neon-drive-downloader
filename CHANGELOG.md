@@ -1,5 +1,22 @@
 # Changelog
 
+## 5.5.0-beta.7
+
+- Added Google Drive dark palette and contextual multicolor buttons.
+- Disabled automatic Rclone monitor opening, including migrated preferences.
+- Parse JSON stats in bytes; report preparation and idle phases, connection timeouts,
+  server errors, and retries without waiting for an integer percent on large files.
+- Separate Drive's 64 MiB upload chunk from local multi-thread chunk settings;
+  cap Rclone managed buffers at 512 MiB without disabling checksum checks.
+- Perform source readiness scans off the UI thread and avoid scanning folders
+  recursively just to populate the initial file list.
+- Add opt-in same-volume download staging for individual files, atomic final
+  placement and cleanup. Folder transfers and uploads remain direct.
+- Detect unambiguous network/cloud transfer direction with manual fallback.
+- Add native Apple Silicon builds and a macOS version manager with safe package
+  replacement/rollback and recoverable uninstall; keep Intel compatibility.
+- Test native GUI launch and DMG installation on both macOS architectures.
+
 ## 5.5.0-beta.6
 
 - Added a macOS application and DMG release build with macOS 12 Monterey as the

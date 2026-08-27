@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 
 import psutil
-from PySide6.QtCore import QSettings, QTimer, QUrl
+from PySide6.QtCore import QSettings, QTimer, QUrl, QThread, Signal
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QApplication,
@@ -26,6 +26,8 @@ from PySide6.QtWidgets import (
 )
 
 from . import __version__
+from .platform_support import is_macos
+from . import macos_installer
 from .single_instance import send_request
 from .updater import (
     LEGACY_ASSET_NAME,
@@ -70,6 +72,9 @@ def _installed_registry_values() -> dict[str, str]:
 
 
 def installed_details() -> tuple[str, Path]:
+    if is_macos():
+        app = macos_installer.installed_app()
+        return macos_installer.installed_version(app), app
     default = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
     default /= "Programs/Neon Drive"
     values = _installed_registry_values()
@@ -81,6 +86,9 @@ def installed_details() -> tuple[str, Path]:
 
 
 def installed_uninstaller() -> Path | None:
+    if is_macos():
+        app = macos_installer.installed_app()
+        return app if app.is_dir() else None
     values = _installed_registry_values()
     raw = values.get("QuietUninstallString") or values.get("UninstallString") or ""
     if raw.startswith('"'):
@@ -100,7 +108,7 @@ def main_app_processes() -> list[psutil.Process]:
     processes: list[psutil.Process] = []
     for process in psutil.process_iter(("name",)):
         try:
-            if str(process.info.get("name") or "").casefold() == "neondrivedownloader.exe":
+            if str(process.info.get("name") or "").casefold() in ("neondrivedownloader.exe", "neondrivedownloader"):
                 processes.append(process)
         except psutil.Error:
             continue
@@ -129,12 +137,31 @@ def close_main_app() -> None:
         raise RuntimeError("Neon Drive не завершился. Закройте приложение вручную.")
 
 
+class MacInstallThread(QThread):
+    succeeded = Signal(str)
+    failed = Signal(str)
+
+    def __init__(self, package: Path, target: Path, parent=None) -> None:
+        super().__init__(parent)
+        self.package, self.target = package, target
+
+    def run(self) -> None:
+        try:
+            self.succeeded.emit(str(macos_installer.install_dmg(self.package, self.target)))
+        except Exception as exc:
+            detail = getattr(exc, "stderr", b"")
+            if isinstance(detail, bytes):
+                detail = detail.decode("utf-8", errors="replace")
+            self.failed.emit(f"{exc}\n{detail}")
+
+
 class VersionManagerWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.releases: list[dict] = []
         self.history_thread: ReleaseHistoryThread | None = None
         self.download_thread: UpdateDownloadThread | None = None
+        self.install_thread: MacInstallThread | None = None
         self.settings = QSettings("NeonTools", "Neon Drive Installer")
         self.dark_mode = self.settings.value("dark_mode", False, type=bool)
         self.installed_version, self.install_directory = installed_details()
@@ -405,6 +432,12 @@ class VersionManagerWindow(QMainWindow):
                 self.operation_failed(str(exc))
                 return
         try:
+            if is_macos():
+                macos_installer.uninstall_to_trash(self.install_directory)
+                self.installed_version, self.install_directory = installed_details()
+                self.uninstaller_path = None
+                self.set_busy(False, "Приложение перемещено в Корзину; настройки сохранены.")
+                return
             subprocess.Popen([str(self.uninstaller_path)], close_fds=True)
         except OSError as exc:
             self.operation_failed(f"Не удалось запустить удаление: {exc}")
@@ -414,6 +447,16 @@ class VersionManagerWindow(QMainWindow):
 
     def download_succeeded(self, downloaded: Path, release: dict) -> None:
         try:
+            if is_macos() and downloaded.suffix.lower() == ".dmg":
+                self.set_busy(True, "Установка в Applications и проверка пакета…")
+                thread = MacInstallThread(downloaded, self.install_directory, self)
+                self.install_thread = thread
+                thread.succeeded.connect(self.mac_install_succeeded)
+                thread.failed.connect(self.operation_failed)
+                thread.finished.connect(lambda: setattr(self, "install_thread", None))
+                thread.finished.connect(thread.deleteLater)
+                thread.start()
+                return
             if downloaded.name in SETUP_ASSET_NAMES:
                 subprocess.Popen([str(downloaded)], close_fds=True)
                 self.status.setText("Установщик запущен. Менеджер версий закрывается…")
@@ -433,8 +476,23 @@ class VersionManagerWindow(QMainWindow):
         self.set_busy(False, "Операция завершилась ошибкой")
         QMessageBox.critical(self, "Neon Drive Installer", message)
 
+    def mac_install_succeeded(self, installed: str) -> None:
+        self.installed_version, self.install_directory = installed_details()
+        self.uninstaller_path = installed_uninstaller()
+        self.set_busy(False, f"Установлена {self.installed_version}. Запуск приложения…")
+        subprocess.Popen(["open", installed])
+
+    def closeEvent(self, event) -> None:
+        if any(thread and thread.isRunning() for thread in (self.history_thread, self.download_thread, self.install_thread)):
+            event.ignore()
+            self.status.setText("Дождитесь завершения текущей операции.")
+            return
+        super().closeEvent(event)
+
 
 def main() -> int:
+    if "--smoke-test" in sys.argv:
+        os.environ["NEON_DRIVE_DISABLE_NETWORK"] = "1"
     app = QApplication(sys.argv)
     app.setApplicationName("Neon Drive Installer")
     app.setOrganizationName("NeonTools")

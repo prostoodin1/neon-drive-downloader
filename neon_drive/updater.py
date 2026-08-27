@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import platform
 import re
 import shutil
 import subprocess
@@ -23,8 +24,9 @@ SETUP_ASSET_NAME = "NeonDrive-Setup.exe"
 PREVIOUS_SETUP_ASSET_NAME = "NeonDriveDownloader-Setup.exe"
 LEGACY_ASSET_NAME = "NeonDriveDownloader.exe"
 MACOS_ASSET_NAME = "NeonDrive-macOS-x64.dmg"
+MACOS_ARM_ASSET_NAME = "NeonDrive-macOS-arm64.dmg"
 SETUP_ASSET_NAMES = (SETUP_ASSET_NAME, PREVIOUS_SETUP_ASSET_NAME)
-ASSET_NAMES = (*SETUP_ASSET_NAMES, LEGACY_ASSET_NAME, MACOS_ASSET_NAME)
+ASSET_NAMES = (*SETUP_ASSET_NAMES, LEGACY_ASSET_NAME, MACOS_ASSET_NAME, MACOS_ARM_ASSET_NAME)
 API_URL = f"https://api.github.com/repos/{REPOSITORY}/releases/latest"
 RELEASES_URL = f"https://api.github.com/repos/{REPOSITORY}/releases?per_page=100"
 LAST_DOWNLOAD_DIRECTORY = "last-download"
@@ -86,7 +88,7 @@ def _normalize_release(data: dict, method: str) -> dict:
     tag = str(data.get("tag_name", ""))
     assets = data.get("assets") or []
     preferred_names = (
-        (MACOS_ASSET_NAME,)
+        ((MACOS_ARM_ASSET_NAME, MACOS_ASSET_NAME) if platform.machine().lower() in ("arm64", "aarch64") else (MACOS_ASSET_NAME,))
         if is_macos()
         else (*SETUP_ASSET_NAMES, LEGACY_ASSET_NAME)
     )

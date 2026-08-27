@@ -2,6 +2,7 @@
 
 import os
 import sys
+from neon_drive import __version__
 
 # Prefer Windows' ICU over unrelated DLLs exposed by PDF/developer tools on PATH.
 if os.name == 'nt':
@@ -104,6 +105,8 @@ if sys.platform == 'darwin':
         icon=None,
         bundle_identifier='com.neontools.neondrive',
         info_plist={
+            'CFBundleShortVersionString': __version__,
+            'CFBundleVersion': '5.5.0.7',
             'LSMinimumSystemVersion': '12.0',
             'NSHighResolutionCapable': True,
         },

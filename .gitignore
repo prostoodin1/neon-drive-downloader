@@ -10,6 +10,7 @@ dist/
 !NeonDriveDownloader.spec
 !NeonDriveDownloader-OneFile.spec
 !NeonDriveInstaller.spec
+!NeonDriveInstallerMac.spec
 vendor/rclone/rclone.exe
 vendor/rclone/rclone
 vendor/rclone/install.json

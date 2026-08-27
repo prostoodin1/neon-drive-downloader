@@ -69,10 +69,14 @@ def rclone_arguments(
         command,
         str(source_path),
         str(target),
-        "--progress",
         "--stats=1s",
-        "--stats-one-line",
+        "--stats-log-level=NOTICE",
+        "--use-json-log",
+        "--log-level=INFO",
         "--color=NEVER",
+        "--contimeout=30s",
+        "--timeout=5m",
+        "--max-buffer-memory=512Mi",
         f"--multi-thread-chunk-size={max(1, int(selected.chunk_size_mib))}Mi",
         f"--multi-thread-cutoff={max(1, int(selected.multi_thread_cutoff_mib))}Mi",
         f"--multi-thread-streams={max(1, min(32, int(selected.multi_thread_streams)))}",
@@ -93,7 +97,9 @@ def rclone_arguments(
     if selected.local_no_preallocate:
         args.append("--local-no-preallocate")
     if is_rclone_remote_path(destination):
-        args.append(f"--drive-chunk-size={max(1, int(selected.chunk_size_mib))}Mi")
+        # Drive buffers one chunk per transfer; do not reuse the 2 GiB local
+        # multithread chunk setting (which could allocate tens of GiB of RAM).
+        args.append("--drive-chunk-size=64Mi")
     if selected.config_path:
         args.append(f"--config={selected.config_path}")
     return args, target
