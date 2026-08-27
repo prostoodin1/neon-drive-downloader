@@ -1,5 +1,10 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+import os
+
+# Qt uses the Windows ICU API, not an unrelated tool's versioned ICU build.
+system32 = os.path.join(os.environ.get('SystemRoot', r'C:\Windows'), 'System32')
+os.environ['PATH'] = system32 + os.pathsep + os.environ.get('PATH', '')
 
 a = Analysis(
     ['installer_main.py'],

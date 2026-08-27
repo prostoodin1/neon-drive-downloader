@@ -3,6 +3,11 @@
 import os
 import sys
 
+# Prefer Windows' ICU over unrelated DLLs exposed by PDF/developer tools on PATH.
+if os.name == 'nt':
+    system32 = os.path.join(os.environ.get('SystemRoot', r'C:\Windows'), 'System32')
+    os.environ['PATH'] = system32 + os.pathsep + os.environ.get('PATH', '')
+
 
 rclone_name = 'rclone.exe' if os.name == 'nt' else 'rclone'
 app_icon = ['assets/neon-drive-v2.ico'] if os.name == 'nt' else None
