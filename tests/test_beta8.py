@@ -16,7 +16,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 os.environ.setdefault("NEON_DRIVE_DISABLE_AUTO_UPDATE", "1")
 os.environ.setdefault("NEON_DRIVE_DISABLE_NETWORK", "1")
 
-from PySide6.QtWidgets import QApplication, QDialog, QMessageBox
+from PySide6.QtWidgets import QApplication, QDialog, QMessageBox, QFrame
 from PySide6.QtCore import QSettings
 from PySide6.QtTest import QTest
 from shiboken6 import isValid
@@ -274,6 +274,14 @@ class Beta8Tests(unittest.TestCase):
         self.assertTrue(context.check_hostname)
         self.assertEqual(context.verify_mode, ssl.CERT_REQUIRED)
         self.assertGreater(context.cert_store_stats()["x509_ca"], 0)
+
+    def test_delayed_animation_is_compatible_with_macos_qt(self):
+        window = self.window()
+        window.animations_check.setChecked(True)
+        card = QFrame(window)
+        window.animate_appearance(card, duration=15, delay=10)
+        QTest.qWait(120)
+        self.assertIsNone(card.graphicsEffect())
 
     def test_download_digest_mismatch_preserves_previous_package(self):
         with tempfile.TemporaryDirectory() as temporary:

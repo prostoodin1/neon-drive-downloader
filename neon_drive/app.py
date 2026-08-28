@@ -5047,7 +5047,13 @@ class MainWindow(QMainWindow):
         animation.finished.connect(cleanup)
         widget.destroyed.connect(widget_destroyed)
         if delay:
-            QTimer.singleShot(delay, widget, animation.start)
+            # Qt 6.5 (macOS) lacks the context+callable singleShot overload.
+            # Parenting the timer keeps the same lifetime/cancellation safety.
+            timer = QTimer(widget)
+            timer.setSingleShot(True)
+            timer.timeout.connect(animation.start)
+            timer.timeout.connect(timer.deleteLater)
+            timer.start(delay)
         else:
             animation.start()
 
