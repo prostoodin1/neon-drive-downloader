@@ -145,7 +145,9 @@ class Beta8Tests(unittest.TestCase):
             self.skipTest("Bundled Rclone is fetched in the build step.")
         def throttled(*args, **kwargs):
             command, target = rclone_arguments(*args, **kwargs)
-            return [*command, "--bwlimit=1M"], target
+            # APFS cloning can finish before Stop is clicked and bypasses the
+            # bandwidth limiter. Exercise a real streamed copy in this test.
+            return [*command, "--bwlimit=1M", "--local-no-clone"], target
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             source = root / "source.bin"
