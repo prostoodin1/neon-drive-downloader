@@ -282,7 +282,9 @@ class Beta8Tests(unittest.TestCase):
         window.animations_check.setChecked(True)
         card = QFrame(window)
         window.animate_appearance(card, duration=15, delay=10)
-        QTest.qWait(120)
+        deadline = time.monotonic() + 3
+        while card.graphicsEffect() is not None and time.monotonic() < deadline:
+            QTest.qWait(20)
         self.assertIsNone(card.graphicsEffect())
 
     def test_download_digest_mismatch_preserves_previous_package(self):
