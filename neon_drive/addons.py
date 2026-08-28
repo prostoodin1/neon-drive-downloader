@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from .network import https_context
+
 import json
 import os
 import urllib.request
@@ -91,7 +93,7 @@ def install_upload_addon(app_version: str) -> Path:
         upload_addon_source_url(app_version),
         headers={"Accept": "application/json", "User-Agent": "NeonDriveDownloader"},
     )
-    with urllib.request.urlopen(request, timeout=20) as response:
+    with urllib.request.urlopen(request, timeout=20, context=https_context()) as response:
         payload = response.read(MAX_MANIFEST_BYTES + 1)
     if not payload or len(payload) > MAX_MANIFEST_BYTES:
         raise RuntimeError("Пакет дополнения пустой или имеет неожиданный размер.")

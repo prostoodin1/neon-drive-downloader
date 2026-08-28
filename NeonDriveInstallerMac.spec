@@ -21,7 +21,7 @@ app = BUNDLE(
     bundle_identifier='com.neontools.neondrive.installer',
     info_plist={
         'CFBundleShortVersionString': __version__,
-        'CFBundleVersion': '5.5.0.7',
+        'CFBundleVersion': '5.5.0.8',
         'LSMinimumSystemVersion': '12.0',
         'NSHighResolutionCapable': True,
     },

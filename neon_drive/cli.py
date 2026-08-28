@@ -25,7 +25,7 @@ def build_parser() -> argparse.ArgumentParser:
     add.add_argument("--direction", choices=("download", "upload"), default="download")
     add.add_argument("--source", action="append", required=True, dest="sources")
     add.add_argument("--destination", required=True)
-    add.add_argument("--profile", choices=("slow", "optimal", "maximum"), default="optimal")
+    add.add_argument("--profile", choices=("slow", "optimal", "maximum", "extreme"), default="optimal")
     add.add_argument("--start", action="store_true", help="Сразу запустить созданную очередь")
     return parser
 

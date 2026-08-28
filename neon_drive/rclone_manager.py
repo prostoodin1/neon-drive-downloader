@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from .network import https_context
+
 import hashlib
 import io
 import json
@@ -102,7 +104,7 @@ def _fetch_bytes(
         url,
         headers={"Accept": "application/octet-stream", "User-Agent": "NeonDriveDownloader"},
     )
-    with urllib.request.urlopen(request, timeout=60) as response:
+    with urllib.request.urlopen(request, timeout=60, context=https_context()) as response:
         total_header = getattr(response, "headers", {}).get("Content-Length", "0")
         try:
             total = int(total_header)

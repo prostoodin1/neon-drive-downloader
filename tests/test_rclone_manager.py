@@ -45,7 +45,8 @@ class RcloneManagerTests(unittest.TestCase):
                 f"{rclone_manager.DOWNLOADS_ROOT}/v1.2.3/{filename}": archive,
             }
 
-            def open_url(request, timeout=0):
+            def open_url(request, timeout=0, context=None):
+                self.assertTrue(context.check_hostname)
                 return FakeResponse(responses[request.full_url])
 
             with (
@@ -94,7 +95,8 @@ class RcloneManagerTests(unittest.TestCase):
                 f"{rclone_manager.DOWNLOADS_ROOT}/v1.2.3/{filename}": archive,
             }
 
-            def open_url(request, timeout=0):
+            def open_url(request, timeout=0, context=None):
+                self.assertTrue(context.check_hostname)
                 return FakeResponse(responses[request.full_url])
 
             previous = os.environ.get("NEON_DRIVE_RCLONE_DIR")
@@ -126,7 +128,8 @@ class RcloneManagerTests(unittest.TestCase):
                 f"{rclone_manager.DOWNLOADS_ROOT}/v1.2.3/{filename}": archive,
             }
 
-            def open_url(request, timeout=0):
+            def open_url(request, timeout=0, context=None):
+                self.assertTrue(context.check_hostname)
                 return FakeResponse(responses[request.full_url])
 
             previous = os.environ.get("NEON_DRIVE_RCLONE_DIR")

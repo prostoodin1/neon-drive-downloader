@@ -23,6 +23,8 @@ jobs:
         run: python scripts/run_tests.py
       - name: Download verified bundled Rclone
         run: python scripts/fetch_rclone.py
+      - name: Verify real transfer and cancellation
+        run: python scripts/run_tests.py tests.test_beta7.Beta7Tests.test_real_rclone_copy_reports_bytes_and_preserves_hash tests.test_beta8.Beta8Tests.test_visible_stop_ends_real_rclone_without_modifying_source
       - name: Build application, hidden CLI, and version manager
         run: |
           python -m PyInstaller --noconfirm --clean NeonDriveDownloader.spec
@@ -30,6 +32,8 @@ jobs:
           python -m PyInstaller --noconfirm --clean NeonDriveInstaller.spec
       - name: Smoke-test packaged application
         run: python scripts/smoke_bundle.py dist/NeonDriveDownloader
+      - name: Verify standalone installer HTTPS without GitHub CLI
+        run: python scripts/smoke_installer.py dist/NeonDriveInstaller.exe
       - name: Build Windows installer
         shell: pwsh
         run: |
@@ -79,9 +83,11 @@ jobs:
       - name: Install dependencies
         run: python -m pip install -r requirements.txt
       - name: Run cross-platform tests
-        run: python scripts/run_tests.py tests.test_copy_engines tests.test_google_drive tests.test_updater tests.test_platform_support tests.test_beta6 tests.test_beta7 tests.test_single_instance tests.test_windows_startup.WindowsStartupTests.test_macos_launch_agent_can_be_enabled_and_removed tests.test_rclone_manager.RcloneManagerTests.test_macos_archive_is_verified_and_installed_as_executable
+        run: python scripts/run_tests.py tests.test_copy_engines tests.test_google_drive tests.test_updater tests.test_platform_support tests.test_beta6 tests.test_beta7 tests.test_beta8 tests.test_single_instance tests.test_windows_startup.WindowsStartupTests.test_macos_launch_agent_can_be_enabled_and_removed tests.test_rclone_manager.RcloneManagerTests.test_macos_archive_is_verified_and_installed_as_executable
       - name: Download verified native Rclone
         run: python scripts/fetch_rclone.py --platform osx --arch ${{ matrix.rclone_arch }} --force
+      - name: Verify real transfer and cancellation
+        run: python scripts/run_tests.py tests.test_beta7.Beta7Tests.test_real_rclone_copy_reports_bytes_and_preserves_hash tests.test_beta8.Beta8Tests.test_visible_stop_ends_real_rclone_without_modifying_source
       - name: Build macOS application
         run: |
           python -m PyInstaller --noconfirm --clean NeonDriveDownloader.spec
@@ -90,6 +96,8 @@ jobs:
         run: python scripts/smoke_bundle.py "dist/Neon Drive.app"
       - name: Verify native bundles and LaunchServices startup
         run: python scripts/smoke_macos.py
+      - name: Verify standalone installer HTTPS without GitHub CLI
+        run: python scripts/smoke_installer.py "dist/Neon Drive Installer.app/Contents/MacOS/NeonDriveInstaller"
       - name: Create application and version manager DMGs
         run: |
           mkdir -p dist/dmg
@@ -126,3 +134,7 @@ jobs:
           args=()
           if [[ "$tag" == *-* ]]; then args+=(--prerelease); fi
           gh release create "$tag" release/*.exe release/*.dmg --title "Neon Drive $tag" --notes-file RELEASE_NOTES.md "${args[@]}"
+      - name: Update public fallback catalog
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/publish_release_catalog.py

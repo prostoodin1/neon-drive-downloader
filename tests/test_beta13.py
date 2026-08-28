@@ -11,6 +11,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 os.environ.setdefault("NEON_DRIVE_DISABLE_AUTO_UPDATE", "1")
 
 from PySide6.QtCore import QSettings
+from neon_drive.settings_store import create_settings
 from PySide6.QtWidgets import QApplication
 
 from neon_drive.app import MainWindow
@@ -42,7 +43,7 @@ class Beta13Tests(unittest.TestCase):
                 widget.close()
                 widget.deleteLater()
         self.app.processEvents()
-        settings = QSettings("NeonTools", "Neon Drive Downloader")
+        settings = create_settings("Neon Drive Downloader")
         settings.clear()
         settings.sync()
 
@@ -82,7 +83,7 @@ class Beta13Tests(unittest.TestCase):
             window.windows_startup_check.setChecked(True)
             window.persist_settings()
 
-        settings = QSettings("NeonTools", "Neon Drive Downloader")
+        settings = create_settings("Neon Drive Downloader")
         self.assertTrue(settings.value("auto_system_health", False, type=bool))
         self.assertTrue(settings.value("keep_open_after_finish", False, type=bool))
         self.assertTrue(settings.value("windows_startup", False, type=bool))

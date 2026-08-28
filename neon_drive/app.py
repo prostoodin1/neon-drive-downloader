@@ -82,8 +82,10 @@ from PySide6.QtWidgets import (
 )
 
 from . import __version__
+from .settings_store import create_settings
 from .transfer_buffer import TransferBuffer
 from .transfer_direction import detect_direction
+from .drive_browser import DriveFolderDialog, is_managed_drive_path, virtual_drive_parts
 from .addons import (
     install_upload_addon,
     is_beta_build,
@@ -536,6 +538,7 @@ class ProfileCard(QFrame):
         "slow": QColor("#34a853"),
         "optimal": QColor("#f9ab00"),
         "maximum": QColor("#ea4335"),
+        "extreme": QColor("#a142f4"),
     }
 
     def __init__(self, profile_key: str) -> None:
@@ -768,9 +771,11 @@ class Downloader(QProcess):
             psutil.Process(self.processId()).resume()
 
     def stop(self) -> None:
-        if not self.processId():
-            return
         self._user_stopped = True
+        if not self.processId():
+            if self.state() != QProcess.NotRunning:
+                self.kill()
+            return
         try:
             proc = psutil.Process(self.processId())
             for child in proc.children(recursive=True):
@@ -936,9 +941,11 @@ class RcloneDownloader(QProcess):
             psutil.Process(self.processId()).resume()
 
     def stop(self) -> None:
-        if not self.processId():
-            return
         self._user_stopped = True
+        if not self.processId():
+            if self.state() != QProcess.NotRunning:
+                self.kill()
+            return
         try:
             proc = psutil.Process(self.processId())
             for child in proc.children(recursive=True):
@@ -1397,16 +1404,8 @@ class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
-        settings_override = os.environ.get("NEON_DRIVE_SETTINGS_DIR")
-        if settings_override:
-            QSettings.setDefaultFormat(QSettings.Format.IniFormat)
-            QSettings.setPath(
-                QSettings.Format.IniFormat,
-                QSettings.Scope.UserScope,
-                settings_override,
-            )
         # Keep the beta.12 settings namespace so upgrades retain every preference.
-        self.settings = QSettings("NeonTools", SETTINGS_APP_NAME)
+        self.settings = create_settings(SETTINGS_APP_NAME)
         self.transfer_stats = TransferStats(self.settings)
         self.queue: deque[str] = deque()
         self.workers: dict[str, Downloader | RcloneDownloader | TurboFileDownloader] = {}
@@ -1444,6 +1443,8 @@ class MainWindow(QMainWindow):
         self.system_health_silent = False
         self.rclone_monitor: RcloneMonitorWindow | None = None
         self.active_engines: set[str] = set()
+        self.cloud_browser: DriveFolderDialog | None = None
+        self._cloud_picker_request: tuple[str, str] | None = None
         self.snapshot_threads: dict[str, SourceSnapshotThread] = {}
         self.snapshot_results: dict[str, tuple] = {}
         self.robocopy_executable = "robocopy.exe"
@@ -1826,6 +1827,7 @@ class MainWindow(QMainWindow):
         preset_combo.addItem("Медленно · минимум нагрузки", "slow")
         preset_combo.addItem("Оптимально · рекомендуется", "optimal")
         preset_combo.addItem("Максимально · весь доступный канал", "maximum")
+        preset_combo.addItem("Экстрим · выгрузка чанками 1 ГиБ", "extreme")
         preset_combo.setMinimumWidth(205)
         hero_row.addWidget(transfer_title)
         hero_row.addStretch()
@@ -1836,6 +1838,7 @@ class MainWindow(QMainWindow):
         sources.setPlaceholderText("Выберите файлы или папку через Проводник…")
         sources.setFixedHeight(58)
         source_buttons = QHBoxLayout()
+        source_buttons.setContentsMargins(0, 0, 0, 0)
         choose_files_button = QPushButton("Выбрать файлы")
         choose_files_button.setProperty("colorRole", "download")
         choose_files_button.setMaximumWidth(150)
@@ -1854,6 +1857,14 @@ class MainWindow(QMainWindow):
         clear_button.setProperty("colorRole", "danger")
         clear_button.setMaximumWidth(46)
         clear_button.clicked.connect(sources.clear)
+        choose_file_button = QPushButton("Выбрать файл")
+        choose_file_button.setProperty("colorRole", "download")
+        choose_file_button.setToolTip("Заменить весь список одним выбранным файлом")
+        choose_file_button.clicked.connect(
+            lambda _checked=False, selected=direction: self.choose_single_file_for(selected)
+        )
+        choose_files_button.setText("Добавить файлы")
+        source_buttons.addWidget(choose_file_button)
         source_buttons.addWidget(choose_files_button)
         source_buttons.addWidget(choose_folder_button)
         source_buttons.addWidget(clear_button)
@@ -1879,11 +1890,10 @@ class MainWindow(QMainWindow):
         )
         google_drive_button = QPushButton("Google Drive")
         google_drive_button.setObjectName("primarySmall")
-        google_drive_button.setToolTip("Подключить Google Drive напрямую через OAuth2")
+        google_drive_button.setToolTip("Выбрать облачную папку Google Drive через OAuth2")
         google_drive_button.setVisible(upload)
         google_drive_button.clicked.connect(self.use_or_connect_google_drive)
         destination_row.addWidget(destination, 1)
-        destination_row.addWidget(google_drive_button)
         destination_row.addWidget(browse_button)
         destination_row.addWidget(show_destination_button)
 
@@ -1895,7 +1905,10 @@ class MainWindow(QMainWindow):
             0,
             0,
         )
-        path_grid.addWidget(self.label("КУДА · СЕТЕВОЙ ДИСК" if upload else "КУДА · ЛОКАЛЬНО"), 0, 2)
+        destination_heading = QHBoxLayout()
+        destination_heading.addWidget(self.label("КУДА · СЕТЕВОЙ ДИСК" if upload else "КУДА · ЛОКАЛЬНО"), 1)
+        destination_heading.addWidget(google_drive_button)
+        path_grid.addLayout(destination_heading, 0, 2)
         direction_toggle_button = QPushButton("⇅")
         direction_toggle_button.setObjectName("directionToggleButton")
         direction_toggle_button.setFixedSize(38, 30)
@@ -1922,7 +1935,14 @@ class MainWindow(QMainWindow):
         start_button.clicked.connect(
             lambda _checked=False, selected=direction: self.start_transfers(selected)
         )
-        path_grid.addWidget(start_button, 2, 2)
+        transfer_actions = QHBoxLayout()
+        transfer_actions.addWidget(start_button, 1)
+        visible_stop = QPushButton("Остановить")
+        visible_stop.setProperty("colorRole", "danger")
+        visible_stop.setEnabled(False)
+        visible_stop.clicked.connect(self.stop_now)
+        transfer_actions.addWidget(visible_stop)
+        path_grid.addLayout(transfer_actions, 2, 2)
         path_grid.setColumnStretch(0, 5)
         path_grid.setColumnStretch(2, 5)
         form.addLayout(path_grid)
@@ -1933,7 +1953,8 @@ class MainWindow(QMainWindow):
                 [line.strip() for line in sources.toPlainText().splitlines() if line.strip()],
                 destination.text(),
             )
-            route_note.setText(description)
+            selected_label = str(self.settings.value("cloud_label/" + destination.text(), ""))
+            route_note.setText("Прямая выгрузка → " + selected_label if selected_label else description)
         sources.textChanged.connect(update_route_note)
         destination.textChanged.connect(update_route_note)
         form.addWidget(route_note)
@@ -2088,6 +2109,8 @@ class MainWindow(QMainWindow):
         panel.google_drive_button = google_drive_button
         panel.direction_toggle_button = direction_toggle_button
         panel.speed_graph = speed_graph
+        panel.visible_stop_button = visible_stop
+        panel.choose_file_button = choose_file_button
         panel.recent_card = recent_card
         panel.transfer_stats_label = transfer_stats_label
         panel.rclone_monitor_button = rclone_monitor_button
@@ -2155,7 +2178,7 @@ class MainWindow(QMainWindow):
         intro_layout.addWidget(advanced_button)
         layout.addWidget(intro)
 
-        cards = QHBoxLayout()
+        cards = QGridLayout()
         cards.setSpacing(14)
         self.profile_buttons: dict[str, QPushButton] = {}
         profiles = (
@@ -2183,8 +2206,14 @@ class MainWindow(QMainWindow):
                 "Для больших файлов, быстрого SSD и свободного канала. Повышенный расход RAM; скорость всё равно ограничена сетью, диском и сервисом.",
                 (("Скорость", "без лимита"), ("Размер чанка", "512 МиБ"), ("Параллельность", "32 потока"), ("Проверка", "До и после")),
             ),
+            (
+                "extreme", "Экстрим", "Крупные облачные файлы",
+                "Google Drive · чанк 1 ГиБ · один файл за раз",
+                "Чанк выгрузки занимает до 1 ГиБ RAM. Используйте при достаточной памяти и стабильной сети; ускорение не гарантируется.",
+                (("Чанк выгрузки", "1024 МиБ"), ("Файлов сразу", "1"), ("Локальные потоки", "32"), ("Проверка", "До и после")),
+            ),
         )
-        for key, name, badge, details, description, specs in profiles:
+        for profile_index, (key, name, badge, details, description, specs) in enumerate(profiles):
             card = ProfileCard(key)
             card.setMinimumWidth(0)
             box = QVBoxLayout(card)
@@ -2230,7 +2259,7 @@ class MainWindow(QMainWindow):
                 box.addLayout(spec_row)
             box.addStretch()
             box.addWidget(button)
-            cards.addWidget(card, 1)
+            cards.addWidget(card, profile_index // 2, profile_index % 2)
         layout.addLayout(cards, 1)
 
         impact = self.card()
@@ -2619,6 +2648,20 @@ class MainWindow(QMainWindow):
         self.auto_direction_check = self.add_setting_toggle(
             behavior_box, "Автоматически определять загрузку / выгрузку"
         )
+        behavior_box.addWidget(QLabel("Папка Google Drive в Проводнике / Finder"))
+        self.google_route_combo = QComboBox()
+        self.google_route_combo.addItem("Спрашивать: напрямую или обычное копирование", "ask")
+        self.google_route_combo.addItem("Предлагать облачную папку через Neon", "direct")
+        self.google_route_combo.addItem("Обычное копирование через клиент Google", "filesystem")
+        behavior_box.addWidget(self.google_route_combo)
+        behavior_box.addWidget(QLabel("Чанк прямой выгрузки Google Drive"))
+        self.drive_chunk_combo = QComboBox()
+        for chunk in (8, 16, 32, 64, 128, 256, 512, 1024):
+            self.drive_chunk_combo.addItem(f"{chunk} МиБ" + (" · 1 ГиБ" if chunk == 1024 else ""), chunk)
+        behavior_box.addWidget(self.drive_chunk_combo)
+        chunk_note = QLabel("Экстрим: до 1 ГиБ RAM на файл. При чанке 1 ГиБ выгружается один файл за раз. Большой чанк не гарантирует большую скорость.")
+        chunk_note.setWordWrap(True)
+        behavior_box.addWidget(chunk_note)
         grid.addWidget(logs_card, 1, 1)
 
         rclone_card, rclone_box = self.settings_section("RCLONE · СКОРОСТЬ И НАДЁЖНОСТЬ")
@@ -3150,11 +3193,12 @@ class MainWindow(QMainWindow):
         configure: bool = True,
     ) -> None:
         """Apply the same simple speed preset to Robocopy and Rclone."""
-        preset = preset if preset in ("slow", "optimal", "maximum") else "optimal"
+        preset = preset if preset in ("slow", "optimal", "maximum", "extreme") else "optimal"
         mapping = {
             "slow": ("stable", "balanced", "sequential", 2, 2),
             "optimal": ("optimized", "fast", "sequential", 8, 8),
             "maximum": ("maximum", "extreme", "all", 16, 16),
+            "extreme": ("maximum", "extreme", "sequential", 16, 16),
         }
         copy_profile, rclone_profile, queue_mode, directory_threads, turbo_threads = mapping[preset]
         for panel in self.transfer_panels.values():
@@ -3186,6 +3230,8 @@ class MainWindow(QMainWindow):
         select(self.download_mode_combo, "sequential" if engine in ("rclone", "hybrid") else queue_mode)
         self.directory_threads_slider.setValue(directory_threads)
         self.turbo_threads_slider.setValue(turbo_threads)
+        if hasattr(self, "drive_chunk_combo"):
+            select(self.drive_chunk_combo, 1024 if preset == "extreme" else 64)
         if persist:
             self.settings.setValue("transfer_preset", preset)
             self.settings.sync()
@@ -3850,6 +3896,8 @@ class MainWindow(QMainWindow):
         self.auto_rclone_monitor_check.setChecked(False)
         self.download_buffer_check.setChecked(self.settings.value("download_buffer", False, type=bool))
         self.auto_direction_check.setChecked(self.settings.value("auto_direction", True, type=bool))
+        select(self.google_route_combo, self.settings.value("google_drive_route", "ask"))
+        select(self.drive_chunk_combo, self.settings.value("drive_chunk_mib", 64, type=int))
         self.cleanup_logs_check.setChecked(
             self.settings.value("cleanup_logs", True, type=bool)
         )
@@ -3910,6 +3958,8 @@ class MainWindow(QMainWindow):
             self.auto_rclone_monitor_check.stateChanged,
             self.download_buffer_check.stateChanged,
             self.auto_direction_check.stateChanged,
+            self.google_route_combo.currentIndexChanged,
+            self.drive_chunk_combo.currentIndexChanged,
             self.cleanup_logs_check.stateChanged,
             self.log_retention_combo.currentIndexChanged,
         ):
@@ -3935,6 +3985,8 @@ class MainWindow(QMainWindow):
     def persist_settings(self) -> None:
         self.settings.setValue("download_buffer", self.download_buffer_check.isChecked())
         self.settings.setValue("auto_direction", self.auto_direction_check.isChecked())
+        self.settings.setValue("google_drive_route", self.google_route_combo.currentData())
+        self.settings.setValue("drive_chunk_mib", self.drive_chunk_combo.currentData())
         self.settings.setValue("window_geometry", self.saveGeometry())
         self.settings.setValue("window_maximized", self.isMaximized())
         self.settings.setValue("active_tab", self.tab_key(self.tabs.currentWidget()))
@@ -4481,16 +4533,38 @@ class MainWindow(QMainWindow):
             upload_button.setText("Google Drive ✓" if connected else "Google Drive")
 
     def use_or_connect_google_drive(self) -> None:
+        self.choose_cloud_destination("upload", self.upload_destination.text())
+
+    def choose_cloud_destination(self, direction: str, original: str) -> bool:
+        if self.running or self.cloud_browser is not None:
+            return False
         if not google_drive_connected():
+            self._cloud_picker_request = (direction, original)
             self.start_google_drive_oauth()
-            return
-        self.upload_destination.setText(GOOGLE_DRIVE_ROOT)
-        rclone_index = self.copy_engine_combo.findData("rclone")
-        if rclone_index >= 0:
-            self.copy_engine_combo.setCurrentIndex(rclone_index)
-        self.settings.setValue("upload_destination", GOOGLE_DRIVE_ROOT)
-        self.settings.setValue("copy_engine", "rclone")
-        self.refresh_file_rows("upload")
+            return False
+        executable = self.resolved_rclone_executable()
+        if not executable:
+            QMessageBox.warning(self, APP_NAME, "Встроенный Rclone не найден. Переустановите его в настройках.")
+            return False
+        dialog = DriveFolderDialog(executable, original, self)
+        self.cloud_browser = dialog
+        try:
+            if dialog.exec() != QDialog.DialogCode.Accepted or dialog.selected_folder is None:
+                return False
+            selected = dialog.selected_folder
+            remote = selected.remote
+            self.settings.setValue("cloud_label/" + remote, selected.label)
+            panel = self.transfer_panels[direction]
+            panel.destination.setText(remote)
+            panel.destination.setToolTip(selected.label)
+            self.copy_engine_combo.setCurrentIndex(self.copy_engine_combo.findData("rclone"))
+            self.settings.setValue("upload_destination" if direction == "upload" else "destination", remote)
+            self.persist_settings()
+            self.refresh_file_rows(direction)
+            return True
+        finally:
+            self.cloud_browser = None
+            dialog.deleteLater()
 
     def start_google_drive_oauth(self) -> None:
         if self.google_drive_oauth_thread is not None:
@@ -4523,22 +4597,16 @@ class MainWindow(QMainWindow):
 
     @Slot(str)
     def google_drive_oauth_succeeded(self, _config_path: str) -> None:
-        self.upload_destination.setText(GOOGLE_DRIVE_ROOT)
-        rclone_index = self.copy_engine_combo.findData("rclone")
-        if rclone_index >= 0:
-            self.copy_engine_combo.setCurrentIndex(rclone_index)
-        self.settings.setValue("upload_destination", GOOGLE_DRIVE_ROOT)
-        self.settings.setValue("copy_engine", "rclone")
-        self.settings.sync()
         self.append_log("Google Drive OAuth2: аккаунт подключён напрямую к Neon.\n")
         QMessageBox.information(
             self,
             APP_NAME,
-            "Google Drive подключён. Теперь Neon будет выгружать файлы напрямую через Rclone.",
+            "Google Drive подключён. Для прямой выгрузки выберите облачную папку кнопкой Google Drive. Текущий путь сохранён.",
         )
 
     @Slot(str)
     def google_drive_oauth_failed(self, message: str) -> None:
+        self._cloud_picker_request = None
         self.append_log(f"Google Drive OAuth2: авторизация не завершена — {message}\n")
         QMessageBox.critical(self, APP_NAME, f"Не удалось подключить Google Drive:\n{message}")
 
@@ -4546,6 +4614,10 @@ class MainWindow(QMainWindow):
     def google_drive_oauth_finished(self) -> None:
         self.google_drive_oauth_thread = None
         self.refresh_google_drive_status()
+        request = self._cloud_picker_request
+        self._cloud_picker_request = None
+        if request and google_drive_connected():
+            QTimer.singleShot(0, lambda: self.choose_cloud_destination(*request))
 
     def disconnect_google_drive_account(self) -> None:
         if self.running:
@@ -4592,10 +4664,12 @@ class MainWindow(QMainWindow):
         self.system_health_status.style().polish(self.system_health_status)
 
     def maybe_auto_system_health_check(self) -> None:
-        if self.auto_system_health_check.isChecked() and not self.running:
+        if self.auto_system_health_check.isChecked() and not self.running and self.cloud_browser is None:
             self.start_system_health_check(silent=True)
 
     def start_system_health_check(self, silent: bool = False) -> None:
+        if self.cloud_browser is not None or self.google_drive_oauth_thread is not None:
+            return
         if self.system_health_thread is not None and self.system_health_thread.isRunning():
             return
         if self.running or self.workers or self.turbo_workers:
@@ -4765,6 +4839,7 @@ class MainWindow(QMainWindow):
     def selected_rclone_options(self) -> RcloneOptions:
         managed_config = managed_rclone_config_path()
         return RcloneOptions(
+            drive_chunk_size_mib=int(self.drive_chunk_combo.currentData() or 64),
             chunk_size_mib=int(self.rclone_chunk_combo.currentData() or 64),
             multi_thread_cutoff_mib=int(self.rclone_cutoff_combo.currentData() or 256),
             multi_thread_streams=int(self.rclone_streams_combo.currentData() or 4),
@@ -4978,14 +5053,40 @@ class MainWindow(QMainWindow):
 
     def choose_destination_for(self, direction: str) -> bool:
         panel = self.transfer_panels[direction]
+        if is_managed_drive_path(panel.destination.text()):
+            mode = str(self.google_route_combo.currentData())
+            if mode != "filesystem":
+                return self.choose_cloud_destination(direction, panel.destination.text())
         title = "Выберите папку на Google Drive" if direction == "upload" else "Выберите папку"
-        folder = QFileDialog.getExistingDirectory(self, title, panel.destination.text())
+        start = "" if is_rclone_remote_path(panel.destination.text()) else panel.destination.text()
+        folder = QFileDialog.getExistingDirectory(self, title, start)
         if folder:
-            panel.destination.setText(folder)
-            key = "upload_destination" if direction == "upload" else "destination"
-            self.settings.setValue(key, folder)
-            return True
+            return self.accept_destination_folder(direction, folder)
         return False
+
+    def accept_destination_folder(self, direction: str, folder: str) -> bool:
+        panel = self.transfer_panels[direction]
+        mode = str(self.google_route_combo.currentData() or "ask")
+        use_cloud = mode == "direct"
+        if virtual_drive_parts(folder) and mode == "ask":
+            prompt = QMessageBox(self)
+            prompt.setWindowTitle("Как передавать в Google Drive?")
+            prompt.setText("Выбрана папка Google Drive:\n" + folder)
+            prompt.setInformativeText("Через Neon — прямая выгрузка по OAuth2. Обычное копирование — файл затем синхронизирует клиент Google.")
+            direct = prompt.addButton("Через Neon", QMessageBox.ButtonRole.AcceptRole)
+            local = prompt.addButton("Обычное копирование", QMessageBox.ButtonRole.NoRole)
+            prompt.addButton("Отмена", QMessageBox.ButtonRole.RejectRole)
+            prompt.exec()
+            if prompt.clickedButton() not in (direct, local):
+                return False
+            use_cloud = prompt.clickedButton() == direct
+        panel.destination.setText(folder)
+        key = "upload_destination" if direction == "upload" else "destination"
+        self.settings.setValue(key, folder)
+        if virtual_drive_parts(folder) and use_cloud:
+            # Cancel/error in the browser leaves the Explorer selection intact.
+            return self.choose_cloud_destination(direction, folder)
+        return True
 
     def choose_destination(self) -> bool:
         return self.choose_destination_for("download")
@@ -4998,7 +5099,10 @@ class MainWindow(QMainWindow):
                 return
             text = panel.destination.text().strip()
         if is_rclone_remote_path(text):
-            QDesktopServices.openUrl(QUrl("https://drive.google.com/drive/my-drive"))
+            match = re.search(r",root_folder_id=([A-Za-z0-9_-]+):", text)
+            address = ("https://drive.google.com/drive/folders/" + match.group(1)
+                       if match and match.group(1) != "root" else "https://drive.google.com/drive/my-drive")
+            QDesktopServices.openUrl(QUrl(address))
             return
         folder = Path(text).expanduser()
         try:
@@ -5032,6 +5136,19 @@ class MainWindow(QMainWindow):
         if files:
             self.settings.setValue(key, str(Path(files[0]).parent))
             self._append_sources_for(direction, files)
+            if direction == "download":
+                self.maybe_auto_start()
+
+    def choose_single_file_for(self, direction: str) -> None:
+        if self.running:
+            return
+        key = "last_upload_source_dir" if direction == "upload" else "last_source_dir"
+        selected, _ = QFileDialog.getOpenFileName(
+            self, "Выберите файл · заменить список", str(self.settings.value(key, "")), "Все файлы (*)"
+        )
+        if selected:
+            self.settings.setValue(key, str(Path(selected).parent))
+            self.transfer_panels[direction].sources.setPlainText(selected)
             if direction == "download":
                 self.maybe_auto_start()
 
@@ -5213,6 +5330,7 @@ class MainWindow(QMainWindow):
                     panel.sources,
                     panel.destination,
                     panel.choose_files_button,
+                    panel.choose_file_button,
                     panel.choose_folder_button,
                     panel.clear_button,
                     panel.browse_button,
@@ -5226,6 +5344,9 @@ class MainWindow(QMainWindow):
             self.copy_profile_combo,
             self.copy_engine_combo,
             self.rclone_path_edit,
+            self.drive_chunk_combo,
+            self.google_route_combo,
+            *(panel.preset_combo for panel in self.transfer_panels.values()),
         ):
             widget.setEnabled(enabled)
         self.update_settings_visibility()
@@ -5233,7 +5354,7 @@ class MainWindow(QMainWindow):
     def set_transfer_controls_enabled(self, enabled: bool) -> None:
         for direction, panel in self.transfer_panels.items():
             active = enabled and direction == self.active_transfer
-            for button in (panel.pause_button, panel.after_button, panel.stop_button):
+            for button in (panel.pause_button, panel.after_button, panel.stop_button, panel.visible_stop_button):
                 button.setEnabled(active)
 
     def set_download_controls_enabled(self, enabled: bool) -> None:
@@ -5254,7 +5375,7 @@ class MainWindow(QMainWindow):
         self.rclone_monitor.activateWindow()
 
     def start_transfers(self, direction: str) -> None:
-        if self.running or self.workers:
+        if self.running or self.workers or self.cloud_browser is not None or self.google_drive_oauth_thread is not None:
             return
         if direction == "upload" and not self.upload_addon_enabled:
             QMessageBox.warning(
@@ -5291,7 +5412,7 @@ class MainWindow(QMainWindow):
                 self.show_transfer_direction(direction)
         remote_destination = is_rclone_remote_path(destination_text)
         if remote_destination:
-            if not destination_text.startswith(GOOGLE_DRIVE_ROOT):
+            if not is_managed_drive_path(destination_text):
                 QMessageBox.critical(
                     self,
                     APP_NAME,
@@ -5902,7 +6023,7 @@ class MainWindow(QMainWindow):
                     pass
         for worker in list(self.workers.values()):
             worker.stop()
-        self.append_log("■ Получена команда немедленной остановки всех загрузок.\n")
+        self.append_log("■ Получена команда немедленной остановки всех передач и копирований.\n")
         if not self.workers:
             self.finish_queue(stopped=True)
 
@@ -6269,6 +6390,10 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:  # noqa: N802
         self.persist_settings()
+        if self.cloud_browser is not None:
+            self.cloud_browser.reject()
+            event.ignore()
+            return
         if any(thread.isRunning() for thread in self.snapshot_threads.values()):
             self.set_state("●  ЗАВЕРШЕНИЕ ПРОВЕРКИ ИСХОДНИКА")
             event.ignore()

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import ctypes
 from pathlib import Path
 
 import psutil
@@ -13,14 +14,22 @@ def network_location(value: str) -> bool:
         return False
     if is_rclone_remote_path(value) or value.startswith(("\\\\", "//")):
         return True
-    normalized = value.replace("\\", "/").casefold()
+    normalized = value.replace("\\", "/").casefold().rstrip("/") + "/"
     if any(part in normalized for part in (
         "/cloudstorage/", "/google drive/", "/googledrive-", "/мой диск/",
         "/my drive/", "/shared drives/", "/общие диски/",
+        "/unidades compartidas/", "/mi unidad/", "/drives partagés/", "/mon drive/",
     )):
         return True
     try:
         target = os.path.normcase(os.path.abspath(Path(value).expanduser()))
+        if os.name == "nt":
+            # Query this drive only; enumerating all mounted disks can stall the
+            # UI on an unrelated disconnected network drive.
+            get_type = ctypes.windll.kernel32.GetDriveTypeW
+            get_type.argtypes = [ctypes.c_wchar_p]
+            get_type.restype = ctypes.c_uint
+            return get_type(Path(target).anchor) == 4  # DRIVE_REMOTE
         for part in psutil.disk_partitions(all=True):
             mount = os.path.normcase(os.path.abspath(part.mountpoint))
             if target == mount or target.startswith(mount.rstrip("/\\") + os.sep):

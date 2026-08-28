@@ -27,13 +27,14 @@ class RcloneOptions:
     local_no_sparse: bool = True
     local_no_preallocate: bool = True
     config_path: str | None = None
+    drive_chunk_size_mib: int = 64
 
 
 def is_rclone_remote_path(value: str | Path) -> bool:
     text = str(value).strip()
     if re.match(r"^[A-Za-z]:[\\/]", text):
         return False
-    return bool(re.match(r"^[A-Za-z0-9_.-]+:", text))
+    return bool(re.match(r"^[A-Za-z0-9_.-]+(?:,[A-Za-z_]+=[A-Za-z0-9_-]*)*:", text))
 
 
 def rclone_target_path(source: str | Path, destination: str | Path) -> str | Path:
@@ -99,7 +100,15 @@ def rclone_arguments(
     if is_rclone_remote_path(destination):
         # Drive buffers one chunk per transfer; do not reuse the 2 GiB local
         # multithread chunk setting (which could allocate tens of GiB of RAM).
-        args.append("--drive-chunk-size=64Mi")
+        drive_chunk = int(selected.drive_chunk_size_mib)
+        if drive_chunk not in (8, 16, 32, 64, 128, 256, 512, 1024):
+            raise ValueError("Чанк Google Drive должен быть степенью двойки от 8 до 1024 МиБ.")
+        args.append(f"--drive-chunk-size={drive_chunk}Mi")
+        # The Drive backend holds one full chunk per transfer. Large chunks
+        # must not multiply the RAM requirement by 16 or 32 simultaneous files.
+        if drive_chunk > 64:
+            args = [arg for arg in args if not arg.startswith("--transfers=")]
+            args.append(f"--transfers={min(max(1, int(selected.transfers)), max(1, 1024 // drive_chunk))}")
     if selected.config_path:
         args.append(f"--config={selected.config_path}")
     return args, target

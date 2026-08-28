@@ -25,7 +25,7 @@ class TransferStatsTests(unittest.TestCase):
         cls.settings_dir.cleanup()
 
     def setUp(self) -> None:
-        self.settings = QSettings("NeonTools", "Transfer Stats Tests")
+        self.settings = QSettings(QSettings.Format.IniFormat, QSettings.Scope.UserScope, "NeonTools", "Transfer Stats Tests")
         self.settings.clear()
         self.settings.sync()
         self.stats = TransferStats(self.settings)

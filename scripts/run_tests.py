@@ -32,7 +32,7 @@ def main() -> int:
         from PySide6.QtCore import QSettings
 
         with tempfile.TemporaryDirectory(prefix="neon-test-") as temp_dir:
-            os.environ.pop("NEON_DRIVE_SETTINGS_DIR", None)
+            os.environ["NEON_DRIVE_SETTINGS_DIR"] = temp_dir
             os.environ["NEON_DRIVE_DATA_DIR"] = str(Path(temp_dir) / "data")
             QSettings.setDefaultFormat(QSettings.Format.IniFormat)
             QSettings.setPath(

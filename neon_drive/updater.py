@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import platform
 import re
@@ -16,6 +17,7 @@ import psutil
 from PySide6.QtCore import QThread, Signal
 
 from . import __version__
+from .network import https_context
 from .platform_support import app_data_directory, is_macos
 
 
@@ -29,6 +31,7 @@ SETUP_ASSET_NAMES = (SETUP_ASSET_NAME, PREVIOUS_SETUP_ASSET_NAME)
 ASSET_NAMES = (*SETUP_ASSET_NAMES, LEGACY_ASSET_NAME, MACOS_ASSET_NAME, MACOS_ARM_ASSET_NAME)
 API_URL = f"https://api.github.com/repos/{REPOSITORY}/releases/latest"
 RELEASES_URL = f"https://api.github.com/repos/{REPOSITORY}/releases?per_page=100"
+CATALOG_URL = f"https://raw.githubusercontent.com/{REPOSITORY}/main/release-catalog.json"
 LAST_DOWNLOAD_DIRECTORY = "last-download"
 LAST_DOWNLOAD_METADATA = "release.json"
 
@@ -63,7 +66,7 @@ def _public_json(url: str) -> object:
         url,
         headers={"Accept": "application/vnd.github+json", "User-Agent": "NeonDriveDownloader"},
     )
-    with urllib.request.urlopen(request, timeout=15) as response:
+    with urllib.request.urlopen(request, timeout=15, context=https_context()) as response:
         data = json.loads(response.read().decode("utf-8"))
     return data
 
@@ -71,17 +74,64 @@ def _public_json(url: str) -> object:
 def _release_data(latest: bool = True) -> tuple[object, str]:
     url = API_URL if latest else RELEASES_URL
     try:
-        return _public_json(url), "public"
+        data = _public_json(url)
+        if not isinstance(data, (dict, list)):
+            raise ValueError("Некорректный список релизов")
+        _cache_release_data(data)
+        return data, "public"
     except (
         urllib.error.HTTPError,
         urllib.error.URLError,
         TimeoutError,
         json.JSONDecodeError,
-    ) as exc:
+        OSError,
+        ValueError,
+    ):
+        pass
+    try:
+        data = _public_json(CATALOG_URL)
+        selected = _select_catalog(data, latest)
+        _cache_release_data(data)
+        return selected, "public-catalog"
+    except (OSError, ValueError, RuntimeError):
+        pass
+    try:
+        data = json.loads((app_data_dir() / "releases-cache.json").read_text(encoding="utf-8"))
+        return _select_catalog(data, latest), "cached"
+    except (OSError, ValueError, RuntimeError) as exc:
         raise RuntimeError(
             "Публичный список версий GitHub временно недоступен. "
-            "Вход в GitHub и GitHub CLI для установки Neon Drive не требуются."
+            "Вход в GitHub и GitHub CLI для установки Neon Drive не требуются. "
+            "Повторите запрос или выберите уже скачанный пакет кнопкой «Установить файл…»."
         ) from exc
+
+
+def _select_catalog(data: object, latest: bool) -> object:
+    if not isinstance(data, list) or not data:
+        raise ValueError("Пустой или некорректный каталог")
+    releases = [item for item in data if isinstance(item, dict) and item.get("tag_name") and not item.get("draft")]
+    if not releases:
+        raise ValueError("Нет опубликованных версий")
+    if not latest:
+        return releases
+    stable = [item for item in releases if not item.get("prerelease")]
+    if not stable:
+        raise ValueError("Нет стабильных версий")
+    return max(stable, key=lambda item: version_tuple(item["tag_name"]))
+
+
+def _cache_release_data(data: object) -> None:
+    if not isinstance(data, list):
+        return
+    try:
+        _select_catalog(data, False)
+        directory = app_data_dir()
+        directory.mkdir(parents=True, exist_ok=True)
+        temporary = directory / "releases-cache.download"
+        temporary.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        temporary.replace(directory / "releases-cache.json")
+    except (OSError, ValueError):
+        pass
 
 
 def _normalize_release(data: dict, method: str) -> dict:
@@ -114,6 +164,7 @@ def _normalize_release(data: dict, method: str) -> dict:
         "published_at": data.get("published_at") or data.get("created_at") or "",
         "asset_url": asset.get("browser_download_url") or "",
         "asset_name": asset_name,
+        "digest": str(asset.get("digest") or ""),
         "method": method,
         "prerelease": bool(data.get("prerelease")),
         "available": version_tuple(tag) > version_tuple(__version__) or migration,
@@ -205,10 +256,17 @@ def download_release(release: dict) -> Path:
         asset_url,
         headers={"User-Agent": "NeonDriveDownloader"},
     )
-    with urllib.request.urlopen(request, timeout=60) as response, staged.open("wb") as stream:
+    with urllib.request.urlopen(request, timeout=60, context=https_context()) as response, staged.open("wb") as stream:
         shutil.copyfileobj(response, stream)
     if not staged.is_file() or staged.stat().st_size < 1_000_000:
         raise RuntimeError("Загруженный файл обновления отсутствует или повреждён.")
+    digest = str(release.get("digest") or "")
+    if digest.startswith("sha256:"):
+        with staged.open("rb") as stream:
+            actual = "sha256:" + hashlib.file_digest(stream, "sha256").hexdigest()
+        if actual != digest.lower():
+            staged.unlink(missing_ok=True)
+            raise RuntimeError("Контрольная сумма установщика не совпала. Предыдущий пакет сохранён; повторите загрузку.")
     cache_dir = update_dir / LAST_DOWNLOAD_DIRECTORY
     cache_dir.mkdir(parents=True, exist_ok=True)
     destination = cache_dir / asset_name

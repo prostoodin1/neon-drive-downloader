@@ -11,6 +11,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 os.environ.setdefault("NEON_DRIVE_DISABLE_AUTO_UPDATE", "1")
 
 from PySide6.QtCore import QSettings
+from neon_drive.settings_store import create_settings
 from PySide6.QtWidgets import QApplication, QLabel
 
 from neon_drive.addons import UPLOAD_ADDON_FILE
@@ -147,7 +148,7 @@ class StopAfterCurrentFileTests(unittest.TestCase):
             QSettings.Scope.UserScope,
             str(Path(cls.temp_settings.name)),
         )
-        isolated_settings = QSettings("NeonTools", "Neon Drive Downloader")
+        isolated_settings = create_settings("Neon Drive Downloader")
         isolated_settings.clear()
         isolated_settings.sync()
         cls.app = QApplication.instance() or QApplication([])
@@ -161,7 +162,7 @@ class StopAfterCurrentFileTests(unittest.TestCase):
         cls.temp_settings.cleanup()
 
     def setUp(self) -> None:
-        isolated_settings = QSettings("NeonTools", "Neon Drive Downloader")
+        isolated_settings = create_settings("Neon Drive Downloader")
         isolated_settings.clear()
         isolated_settings.sync()
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import json
 import shutil
 import subprocess
 import sys
@@ -11,6 +12,7 @@ from PySide6.QtCore import QSettings, QTimer, QUrl, QThread, Signal
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QApplication,
+    QFileDialog,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -26,6 +28,7 @@ from PySide6.QtWidgets import (
 )
 
 from . import __version__
+from .settings_store import create_settings
 from .platform_support import is_macos
 from . import macos_installer
 from .single_instance import send_request
@@ -162,7 +165,7 @@ class VersionManagerWindow(QMainWindow):
         self.history_thread: ReleaseHistoryThread | None = None
         self.download_thread: UpdateDownloadThread | None = None
         self.install_thread: MacInstallThread | None = None
-        self.settings = QSettings("NeonTools", "Neon Drive Installer")
+        self.settings = create_settings("Neon Drive Installer")
         self.dark_mode = self.settings.value("dark_mode", False, type=bool)
         self.installed_version, self.install_directory = installed_details()
         self.uninstaller_path = installed_uninstaller()
@@ -224,7 +227,7 @@ class VersionManagerWindow(QMainWindow):
         details_layout.addWidget(self.release_meta)
         details_layout.addWidget(QLabel("Что изменилось", objectName="sectionTitle"))
         self.release_notes = QTextBrowser(objectName="notes")
-        self.release_notes.setOpenExternalLinks(False)
+        self.release_notes.setOpenExternalLinks(True)
         details_layout.addWidget(self.release_notes, 1)
         self.progress = QProgressBar()
         self.progress.setRange(0, 0)
@@ -244,6 +247,9 @@ class VersionManagerWindow(QMainWindow):
         actions.addStretch()
         actions.addWidget(self.install_button)
         details_layout.addLayout(actions)
+        self.offline_button = QPushButton("Установить файл… · без интернета")
+        self.offline_button.clicked.connect(self.install_local_package)
+        details_layout.addWidget(self.offline_button)
         content.addWidget(details_card, 7)
         outer.addLayout(content, 1)
 
@@ -319,6 +325,7 @@ class VersionManagerWindow(QMainWindow):
         self._apply_style()
 
     def set_busy(self, busy: bool, text: str) -> None:
+        self.offline_button.setEnabled(not busy)
         self.refresh_button.setEnabled(not busy)
         self.install_button.setEnabled(not busy and self.version_list.currentRow() >= 0)
         self.version_list.setEnabled(not busy)
@@ -350,7 +357,8 @@ class VersionManagerWindow(QMainWindow):
             item = QListWidgetItem(f"{release.get('tag')}   [{channel}]{current}")
             item.setToolTip(str(release.get("published_at") or ""))
             self.version_list.addItem(item)
-        self.set_busy(False, f"Доступно версий: {len(releases)}")
+        offline = " · сохранённый список, сеть недоступна" if any(item.get("method") == "cached" for item in releases) else ""
+        self.set_busy(False, f"Доступно версий: {len(releases)}{offline} · GitHub CLI не требуется")
         if releases:
             self.version_list.setCurrentRow(0)
 
@@ -457,7 +465,7 @@ class VersionManagerWindow(QMainWindow):
                 thread.finished.connect(thread.deleteLater)
                 thread.start()
                 return
-            if downloaded.name in SETUP_ASSET_NAMES:
+            if downloaded.name in SETUP_ASSET_NAMES or (release.get("local_package") and downloaded.suffix.lower() == ".exe"):
                 subprocess.Popen([str(downloaded)], close_fds=True)
                 self.status.setText("Установщик запущен. Менеджер версий закрывается…")
                 QTimer.singleShot(300, QApplication.quit)
@@ -476,6 +484,26 @@ class VersionManagerWindow(QMainWindow):
         self.set_busy(False, "Операция завершилась ошибкой")
         QMessageBox.critical(self, "Neon Drive Installer", message)
 
+    def install_local_package(self) -> None:
+        file_filter = "Neon Drive (*.dmg)" if is_macos() else "Установщик Neon Drive (*.exe)"
+        selected, _ = QFileDialog.getOpenFileName(self, "Уже скачанный установщик Neon Drive", "", file_filter)
+        if not selected:
+            return
+        package = Path(selected)
+        if not package.is_file():
+            self.operation_failed("Выбранный пакет не найден.")
+            return
+        answer = QMessageBox.question(self, "Установка из файла",
+            f"Установить {package.name}?\nЗапущенный Neon будет закрыт. Используйте только пакет из доверенного источника.")
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            if main_app_running():
+                close_main_app()
+            self.download_succeeded(package, {"tag": package.name, "local_package": True})
+        except Exception as exc:
+            self.operation_failed(str(exc))
+
     def mac_install_succeeded(self, installed: str) -> None:
         self.installed_version, self.install_directory = installed_details()
         self.uninstaller_path = installed_uninstaller()
@@ -491,6 +519,19 @@ class VersionManagerWindow(QMainWindow):
 
 
 def main() -> int:
+    if "--network-self-test" in sys.argv:
+        from .updater import release_history
+        from .network import https_context
+        report_path = Path(os.environ["NEON_DRIVE_SMOKE_REPORT"])
+        try:
+            releases = release_history()
+            result = {"ok": bool(releases), "count": len(releases),
+                      "method": releases[0]["method"],
+                      "trusted_cas": https_context().cert_store_stats()["x509_ca"]}
+        except Exception as exc:
+            result = {"ok": False, "error": str(exc)}
+        report_path.write_text(json.dumps(result), encoding="utf-8")
+        return 0 if result["ok"] else 1
     if "--smoke-test" in sys.argv:
         os.environ["NEON_DRIVE_DISABLE_NETWORK"] = "1"
     app = QApplication(sys.argv)

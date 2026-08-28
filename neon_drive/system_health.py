@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from .network import https_context
+
 import os
 import shutil
 import subprocess
@@ -121,7 +123,7 @@ def check_online() -> HealthCheckItem:
         headers={"User-Agent": "NeonDriveDownloader-SystemCheck"},
     )
     try:
-        with urllib.request.urlopen(request, timeout=10) as response:
+        with urllib.request.urlopen(request, timeout=10, context=https_context()) as response:
             payload = response.read(128)
         if b"rclone" not in payload.lower():
             raise RuntimeError("сервер вернул неожиданный ответ")

@@ -13,6 +13,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 os.environ.setdefault("NEON_DRIVE_DISABLE_AUTO_UPDATE", "1")
 
 from PySide6.QtCore import QProcess, QSettings
+from neon_drive.settings_store import create_settings
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
@@ -43,7 +44,7 @@ class Beta7Tests(unittest.TestCase):
         window.close()
 
     def test_old_auto_monitor_preference_is_disabled(self):
-        settings = QSettings("NeonTools", "Neon Drive Downloader")
+        settings = create_settings("Neon Drive Downloader")
         settings.setValue("auto_rclone_monitor", True)
         settings.sync()
         window = MainWindow()
