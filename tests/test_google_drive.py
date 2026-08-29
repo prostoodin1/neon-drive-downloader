@@ -10,7 +10,9 @@ from neon_drive.google_drive import (
     GOOGLE_DRIVE_REMOTE,
     disconnect_google_drive,
     extract_authorize_token,
+    google_drive_accounts,
     google_drive_connected,
+    google_drive_root,
     oauth_completion_template_path,
     store_google_drive_token,
 )
@@ -55,6 +57,39 @@ class GoogleDriveTests(unittest.TestCase):
             self.assertIn("type=drive", contents)
             self.assertTrue(disconnect_google_drive(config_path))
             self.assertFalse(google_drive_connected(config_path))
+
+    def test_multiple_accounts_keep_independent_tokens_labels_and_types(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "rclone.conf"
+            first = {"access_token": "first", "refresh_token": "refresh-first"}
+            second = {"access_token": "second", "refresh_token": "refresh-second"}
+            store_google_drive_token(
+                first,
+                config_path,
+                remote_name=GOOGLE_DRIVE_REMOTE,
+                kind="personal",
+                identity={"email": "one@example.com", "display_name": "One"},
+            )
+            store_google_drive_token(
+                second,
+                config_path,
+                remote_name="NeonGoogleDrive_workspace",
+                kind="workspace",
+                identity={"email": "two@company.example", "display_name": "Two"},
+            )
+
+            accounts = google_drive_accounts(config_path)
+
+            self.assertEqual([account.email for account in accounts], ["one@example.com", "two@company.example"])
+            self.assertEqual(accounts[1].kind, "workspace")
+            self.assertEqual(google_drive_root(accounts[1].remote_name), "NeonGoogleDrive_workspace:")
+            self.assertTrue(
+                google_drive_connected(config_path, "NeonGoogleDrive_workspace")
+            )
+            self.assertTrue(
+                disconnect_google_drive(config_path, "NeonGoogleDrive_workspace")
+            )
+            self.assertTrue(google_drive_connected(config_path, GOOGLE_DRIVE_REMOTE))
 
 
 if __name__ == "__main__":

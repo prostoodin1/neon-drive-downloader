@@ -1,5 +1,17 @@
 # Changelog
 
+## 5.5.0-beta.10
+
+- Add independent OAuth/Rclone profiles for multiple Google accounts with an
+  active-account selector and Personal, Workspace, and Team account categories.
+- Preserve the legacy single Google connection as the first account and keep
+  every token isolated in its own managed Rclone remote.
+- Make visible Stop resumable while a transfer is active: suspend the same
+  Rclone/Robocopy/Turbo worker and let Continue reuse the same PID and session.
+- Keep hard cancellation available in Advanced mode and cancel a waiting queue
+  normally when no worker has started yet.
+- Add real throttled Rclone pause/resume coverage with same-PID and SHA-256 checks.
+
 ## 5.5.0-beta.9
 
 - Select the final Google Drive destination in Explorer/Finder and keep that

@@ -13,12 +13,12 @@ from pathlib import Path
 from PySide6.QtCore import QThread, Qt, Signal
 from PySide6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QPushButton
 
-from .google_drive import GOOGLE_DRIVE_ROOT, managed_rclone_config_path
+from .google_drive import GOOGLE_DRIVE_REMOTE, google_drive_root, managed_rclone_config_path
 
 
 ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
 MANAGED_PATH = re.compile(
-    r"^NeonGoogleDrive(?:,(?:(?:team_drive|root_folder_id)=[A-Za-z0-9_-]+|shared_with_me(?:=true)?))*:"
+    r"^(?P<remote>NeonGoogleDrive(?:_[A-Za-z0-9_-]+)?)(?:,(?:(?:team_drive|root_folder_id)=[A-Za-z0-9_-]+|shared_with_me(?:=true)?))*:"
 )
 SHARED_NAMES = {"shared drives", "unidades compartidas", "общие диски", "drives partagés"}
 MY_NAMES = {"my drive", "мой диск", "mi unidad", "mon drive"}
@@ -146,16 +146,18 @@ def remote_from_explorer_path(
     value: str,
     shared_drive_ids: dict[str, str] | None = None,
     shared_target: ExplorerDriveTarget | None = None,
+    remote_name: str = GOOGLE_DRIVE_REMOTE,
 ) -> str:
     """Convert a Drive for desktop path without walking its cloud folders."""
     parsed = virtual_drive_parts(value)
     if not parsed:
         raise ValueError("Путь не похож на папку Google Drive из Проводника.")
     kind, drive_name, names = parsed
+    remote_root = google_drive_root(remote_name)
     if kind == "my":
-        root = "NeonGoogleDrive:"
+        root = remote_root
     elif kind == "shared_with_me":
-        root = "NeonGoogleDrive,shared_with_me:"
+        root = f"{remote_name},shared_with_me:"
     else:
         if shared_target is not None:
             if not (
@@ -164,7 +166,7 @@ def remote_from_explorer_path(
             ):
                 raise ValueError("Google Drive вернул некорректный ID выбранной папки.")
             return (
-                "NeonGoogleDrive,team_drive="
+                f"{remote_name},team_drive="
                 f"{shared_target.drive_id},root_folder_id={shared_target.folder_id}:"
             )
         identifiers = {name.casefold(): identifier for name, identifier in (shared_drive_ids or {}).items()}
@@ -174,7 +176,7 @@ def remote_from_explorer_path(
                 f"Не удалось сопоставить общий диск «{drive_name}». "
                 "Проверьте подключённый Google-аккаунт и повторите попытку."
             )
-        root = f"NeonGoogleDrive,team_drive={drive_id}:"
+        root = f"{remote_name},team_drive={drive_id}:"
     return root + "/".join(names)
 
 
@@ -185,22 +187,25 @@ class DriveFolder:
     drive_id: str = ""
     label: str = ""
     shared_with_me: bool = False
+    remote_name: str = GOOGLE_DRIVE_REMOTE
 
     @property
     def remote(self) -> str:
         if not ID_PATTERN.fullmatch(self.folder_id) or (self.drive_id and not ID_PATTERN.fullmatch(self.drive_id)):
             raise ValueError("Некорректный ID папки Google Drive.")
         if self.shared_with_me:
-            return "NeonGoogleDrive,shared_with_me:"
+            return f"{self.remote_name},shared_with_me:"
         options = ([f"team_drive={self.drive_id}"] if self.drive_id else []) + [
             f"root_folder_id={self.folder_id}"
         ]
-        return "NeonGoogleDrive," + ",".join(options) + ":"
+        return self.remote_name + "," + ",".join(options) + ":"
 
 
 class DriveClient:
-    def __init__(self, executable: str) -> None:
+    def __init__(self, executable: str, remote_name: str = GOOGLE_DRIVE_REMOTE) -> None:
         self.executable = executable
+        self.remote_name = remote_name
+        self.remote_root = google_drive_root(remote_name)
         self.cancelled = threading.Event()
         self._lock = threading.Lock()
         self._process: subprocess.Popen | None = None
@@ -252,18 +257,18 @@ class DriveClient:
 
     def roots(self) -> list[DriveFolder]:
         roots = [
-            DriveFolder("Мой диск", "root", label="Мой диск"),
-            DriveFolder("Доступные мне", "root", label="Доступные мне", shared_with_me=True),
+            DriveFolder("Мой диск", "root", label="Мой диск", remote_name=self.remote_name),
+            DriveFolder("Доступные мне", "root", label="Доступные мне", shared_with_me=True, remote_name=self.remote_name),
         ]
-        for drive in self.query(["backend", "drives", GOOGLE_DRIVE_ROOT]):
+        for drive in self.query(["backend", "drives", self.remote_root]):
             name, identifier = str(drive.get("name", "")), str(drive.get("id", ""))
             if name and ID_PATTERN.fullmatch(identifier):
-                roots.append(DriveFolder(name, identifier, identifier, "Общие диски / " + name))
+                roots.append(DriveFolder(name, identifier, identifier, "Общие диски / " + name, remote_name=self.remote_name))
         return roots
 
     def shared_drive_ids(self) -> dict[str, str]:
         result: dict[str, str] = {}
-        for drive in self.query(["backend", "drives", GOOGLE_DRIVE_ROOT]):
+        for drive in self.query(["backend", "drives", self.remote_root]):
             name, identifier = str(drive.get("name", "")), str(drive.get("id", ""))
             if name and ID_PATTERN.fullmatch(identifier):
                 result[name] = identifier
@@ -278,7 +283,7 @@ class DriveClient:
                 # shared_with_me is only needed to list the virtual root. Once
                 # a shared folder ID is known, root_folder_id gives reliable
                 # access to all of its children and permits writable folders.
-                result.append(DriveFolder(name, identifier, parent.drive_id, parent.label + " / " + name))
+                result.append(DriveFolder(name, identifier, parent.drive_id, parent.label + " / " + name, remote_name=self.remote_name))
         return sorted(result, key=lambda folder: folder.name.casefold())
 
     def resolve_virtual(self, value: str, roots: list[DriveFolder]) -> list[DriveFolder]:
@@ -300,7 +305,7 @@ class DriveClient:
             if base is None:
                 raise ValueError("Выбранный общий диск недоступен текущему аккаунту.")
             trail = [base] if folder_id in (base.folder_id, "root") else [
-                DriveFolder("Выбранная папка", folder_id, drive_id, base.label + " / папка " + folder_id)
+                DriveFolder("Выбранная папка", folder_id, drive_id, base.label + " / папка " + folder_id, remote_name=self.remote_name)
             ]
             names = [name for name in value[managed.end():].split("/") if name]
             for name in names:

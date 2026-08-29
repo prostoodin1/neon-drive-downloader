@@ -111,11 +111,15 @@ from .copy_engines import (
     rclone_arguments,
 )
 from .google_drive import (
-    GOOGLE_DRIVE_ROOT,
+    GOOGLE_DRIVE_REMOTE,
     disconnect_google_drive,
     extract_authorize_token,
+    fetch_google_drive_identity,
+    google_drive_accounts,
     google_drive_connected,
+    google_drive_root,
     managed_rclone_config_path,
+    new_google_drive_remote_name,
     oauth_completion_template_path,
     store_google_drive_token,
 )
@@ -1313,12 +1317,22 @@ class RcloneInstallThread(QThread):
 
 class GoogleDriveOAuthThread(QThread):
     progress = Signal(str)
-    succeeded = Signal(str)
+    succeeded = Signal(str, str)
     failed = Signal(str)
 
-    def __init__(self, executable: str, parent=None) -> None:
+    def __init__(
+        self,
+        executable: str,
+        remote_name: str = GOOGLE_DRIVE_REMOTE,
+        label: str = "",
+        kind: str = "personal",
+        parent=None,
+    ) -> None:
         super().__init__(parent)
         self.executable = executable
+        self.remote_name = remote_name
+        self.label = label
+        self.kind = kind
         self.process: subprocess.Popen[str] | None = None
 
     def run(self) -> None:
@@ -1351,7 +1365,14 @@ class GoogleDriveOAuthThread(QThread):
                     "Авторизация отменена или Google не выдал разрешение. Попробуйте ещё раз."
                 )
             token = extract_authorize_token(output)
-            path = store_google_drive_token(token)
+            identity = fetch_google_drive_identity(token)
+            path = store_google_drive_token(
+                token,
+                remote_name=self.remote_name,
+                label=self.label,
+                kind=self.kind,
+                identity=identity,
+            )
         except subprocess.TimeoutExpired:
             if self.process is not None:
                 self.process.kill()
@@ -1362,7 +1383,7 @@ class GoogleDriveOAuthThread(QThread):
             return
         finally:
             self.process = None
-        self.succeeded.emit(str(path))
+        self.succeeded.emit(str(path), self.remote_name)
 
     def stop(self) -> None:
         if self.process is not None and self.process.poll() is None:
@@ -1455,7 +1476,8 @@ class MainWindow(QMainWindow):
         self.cloud_browser: DriveFolderDialog | None = None
         self._cloud_picker_request: tuple[str, str] | None = None
         self._start_after_google_oauth: str | None = None
-        self._shared_drive_ids_cache: dict[str, str] | None = None
+        self._shared_drive_ids_cache: dict[str, dict[str, str]] = {}
+        self._refreshing_google_accounts = False
         self.snapshot_threads: dict[str, SourceSnapshotThread] = {}
         self.snapshot_results: dict[str, tuple] = {}
         self.robocopy_executable = "robocopy.exe"
@@ -1954,8 +1976,11 @@ class MainWindow(QMainWindow):
         transfer_actions.addWidget(start_button, 1)
         visible_stop = QPushButton("Остановить")
         visible_stop.setProperty("colorRole", "danger")
+        visible_stop.setToolTip(
+            "Приостановить текущие процессы без потери сессии; повторное нажатие продолжит с того же места"
+        )
         visible_stop.setEnabled(False)
-        visible_stop.clicked.connect(self.stop_now)
+        visible_stop.clicked.connect(self.toggle_resumable_stop)
         transfer_actions.addWidget(visible_stop)
         path_grid.addLayout(transfer_actions, 2, 2)
         path_grid.setColumnStretch(0, 5)
@@ -2184,7 +2209,8 @@ class MainWindow(QMainWindow):
         title = QLabel("Выберите профиль для всех новых передач")
         title.setObjectName("sectionTitle")
         subtitle = QLabel(
-            "Настройки можно изменить отдельно в Advanced mode."
+            "Настройки можно изменить отдельно в Advanced mode. Во всех профилях "
+            "«Остановить → Продолжить» сохраняет активный процесс и место передачи."
         )
         subtitle.setObjectName("transferSubtitle")
         subtitle.setWordWrap(True)
@@ -2295,7 +2321,7 @@ class MainWindow(QMainWindow):
             ("Канал", "до 100%"),
             ("CPU", "адаптивная нагрузка"),
             ("Диск", "крупные блоки"),
-            ("Целостность", "обязательная проверка"),
+            ("Продолжение", "тот же процесс и сессия"),
         ):
             metric = QVBoxLayout()
             metric.addWidget(QLabel(title_text, objectName="settingDescription"))
@@ -2469,13 +2495,34 @@ class MainWindow(QMainWindow):
         google_note.setObjectName("settingDescription")
         google_note.setWordWrap(True)
         google_box.addWidget(google_note)
+        google_account_row = QHBoxLayout()
+        self.google_account_combo = QComboBox()
+        self.google_account_combo.setMinimumWidth(220)
+        self.google_account_combo.setPlaceholderText("Нет подключённых аккаунтов")
+        self.google_account_combo.currentIndexChanged.connect(
+            self.set_active_google_account
+        )
+        self.google_account_kind_combo = QComboBox()
+        self.google_account_kind_combo.addItem("Личный", "personal")
+        self.google_account_kind_combo.addItem("Рабочий / Workspace", "workspace")
+        self.google_account_kind_combo.addItem("Общий / команда", "team")
+        google_account_row.addWidget(QLabel("Аккаунт"))
+        google_account_row.addWidget(self.google_account_combo, 1)
+        google_account_row.addWidget(self.google_account_kind_combo)
+        google_box.addLayout(google_account_row)
         google_actions = QHBoxLayout()
-        self.google_drive_connect_button = QPushButton("Подключить Google Drive")
+        self.google_drive_add_button = QPushButton("Добавить аккаунт")
+        self.google_drive_add_button.setObjectName("primarySmall")
+        self.google_drive_add_button.clicked.connect(
+            lambda _checked=False: self.start_google_drive_oauth(add_new=True)
+        )
+        self.google_drive_connect_button = QPushButton("Переподключить")
         self.google_drive_connect_button.setObjectName("primarySmall")
         self.google_drive_connect_button.clicked.connect(self.start_google_drive_oauth)
         self.google_drive_disconnect_button = QPushButton("Отключить")
         self.google_drive_disconnect_button.setObjectName("danger")
         self.google_drive_disconnect_button.clicked.connect(self.disconnect_google_drive_account)
+        google_actions.addWidget(self.google_drive_add_button)
         google_actions.addWidget(self.google_drive_connect_button)
         google_actions.addWidget(self.google_drive_disconnect_button)
         google_actions.addStretch()
@@ -4537,18 +4584,74 @@ class MainWindow(QMainWindow):
         self.rclone_install_thread = None
         self.refresh_engine_status()
 
+    def active_google_remote(self) -> str:
+        if hasattr(self, "google_account_combo"):
+            selected = str(self.google_account_combo.currentData() or "")
+            if selected:
+                return selected
+        saved = str(self.settings.value("active_google_drive_remote", "") or "")
+        remotes = {account.remote_name for account in google_drive_accounts()}
+        if saved in remotes:
+            return saved
+        if remotes:
+            return next(
+                (account.remote_name for account in google_drive_accounts() if account.remote_name == GOOGLE_DRIVE_REMOTE),
+                next(iter(remotes)),
+            )
+        return GOOGLE_DRIVE_REMOTE
+
+    def google_drive_is_connected(self) -> bool:
+        return google_drive_connected(remote_name=self.active_google_remote())
+
+    @Slot(int)
+    def set_active_google_account(self, _index: int = -1) -> None:
+        if self._refreshing_google_accounts or not hasattr(self, "google_account_combo"):
+            return
+        remote_name = str(self.google_account_combo.currentData() or "")
+        if remote_name:
+            self.settings.setValue("active_google_drive_remote", remote_name)
+            self.settings.sync()
+        self.refresh_google_drive_status()
+
     def refresh_google_drive_status(self) -> None:
         if not hasattr(self, "google_drive_status"):
             return
-        connected = google_drive_connected()
-        self.google_drive_status.setText("● Подключён" if connected else "Не подключён")
+        accounts = google_drive_accounts()
+        saved = str(self.settings.value("active_google_drive_remote", "") or "")
+        selected = saved if any(account.remote_name == saved for account in accounts) else ""
+        if not selected and accounts:
+            selected = next(
+                (account.remote_name for account in accounts if account.remote_name == GOOGLE_DRIVE_REMOTE),
+                accounts[0].remote_name,
+            )
+        self._refreshing_google_accounts = True
+        self.google_account_combo.blockSignals(True)
+        self.google_account_combo.clear()
+        kind_names = {"personal": "Личный", "workspace": "Workspace", "team": "Команда"}
+        for account in accounts:
+            detail = account.email if account.email and account.email != account.label else kind_names.get(account.kind, "Google")
+            self.google_account_combo.addItem(f"{account.label} · {detail}", account.remote_name)
+        index = self.google_account_combo.findData(selected)
+        if index >= 0:
+            self.google_account_combo.setCurrentIndex(index)
+            self.settings.setValue("active_google_drive_remote", selected)
+        self.google_account_combo.blockSignals(False)
+        self._refreshing_google_accounts = False
+        connected = bool(selected and google_drive_connected(remote_name=selected))
+        active = next((account for account in accounts if account.remote_name == selected), None)
+        self.google_drive_status.setText(
+            f"● {active.label}" if connected and active else "Не подключён"
+        )
         self.google_drive_status.setProperty("ready", connected)
         self.google_drive_status.style().unpolish(self.google_drive_status)
         self.google_drive_status.style().polish(self.google_drive_status)
         busy = self.google_drive_oauth_thread is not None
-        self.google_drive_connect_button.setEnabled(not busy)
+        self.google_drive_add_button.setEnabled(not busy)
+        self.google_account_combo.setEnabled(bool(accounts) and not busy)
+        self.google_account_kind_combo.setEnabled(not busy)
+        self.google_drive_connect_button.setEnabled(connected and not busy)
         self.google_drive_connect_button.setText(
-            "Переподключить Google Drive" if connected else "Подключить Google Drive"
+            "Переподключить выбранный" if connected else "Сначала добавьте аккаунт"
         )
         self.google_drive_disconnect_button.setEnabled(connected and not busy)
         upload_button = getattr(self.transfer_panels.get("upload"), "google_drive_button", None)
@@ -4582,7 +4685,7 @@ class MainWindow(QMainWindow):
         )
         return bool(folder and self.accept_destination_folder(direction, folder, force_cloud=True))
 
-    def start_google_drive_oauth(self) -> None:
+    def start_google_drive_oauth(self, add_new: bool = False) -> None:
         if self.google_drive_oauth_thread is not None:
             return
         if self.running:
@@ -4596,13 +4699,32 @@ class MainWindow(QMainWindow):
                 "Встроенный Rclone не найден. Сначала нажмите «Переустановить Rclone».",
             )
             return
-        thread = GoogleDriveOAuthThread(executable, self)
+        accounts = {account.remote_name: account for account in google_drive_accounts()}
+        if add_new or not accounts:
+            remote_name = (
+                GOOGLE_DRIVE_REMOTE if not accounts else new_google_drive_remote_name()
+            )
+            label = ""
+            kind = str(self.google_account_kind_combo.currentData() or "personal")
+        else:
+            remote_name = self.active_google_remote()
+            account = accounts.get(remote_name)
+            label = account.label if account else ""
+            kind = account.kind if account else "personal"
+        thread = GoogleDriveOAuthThread(
+            executable,
+            remote_name=remote_name,
+            label=label,
+            kind=kind,
+            parent=self,
+        )
         self.google_drive_oauth_thread = thread
         thread.progress.connect(self.google_drive_oauth_progressed)
         thread.succeeded.connect(self.google_drive_oauth_succeeded)
         thread.failed.connect(self.google_drive_oauth_failed)
         thread.finished.connect(self.google_drive_oauth_finished)
         self.google_drive_status.setText("Ожидание Google…")
+        self.google_drive_add_button.setEnabled(False)
         self.google_drive_connect_button.setEnabled(False)
         thread.start()
 
@@ -4611,9 +4733,13 @@ class MainWindow(QMainWindow):
         self.google_drive_status.setText("Ожидание подтверждения…")
         self.append_log(f"Google Drive OAuth2: {message}\n")
 
-    @Slot(str)
-    def google_drive_oauth_succeeded(self, _config_path: str) -> None:
-        self._shared_drive_ids_cache = None
+    @Slot(str, str)
+    def google_drive_oauth_succeeded(
+        self, _config_path: str, remote_name: str = GOOGLE_DRIVE_REMOTE
+    ) -> None:
+        self.settings.setValue("active_google_drive_remote", remote_name)
+        self.settings.sync()
+        self._shared_drive_ids_cache.pop(remote_name, None)
         self.settings.remove("google_shared_drive_id")
         self.append_log("Google Drive OAuth2: аккаунт подключён напрямую к Neon.\n")
         QMessageBox.information(
@@ -4638,11 +4764,11 @@ class MainWindow(QMainWindow):
         self._cloud_picker_request = None
         start_direction = self._start_after_google_oauth
         self._start_after_google_oauth = None
-        if request and google_drive_connected():
+        if request and self.google_drive_is_connected():
             direction, path = request
             self.transfer_panels[direction].destination.setText(path)
             self.append_log("Google Drive: конечный путь из Проводника сохранён без облачного поиска.\n")
-        if start_direction and google_drive_connected():
+        if start_direction and self.google_drive_is_connected():
             QTimer.singleShot(0, lambda: self.start_transfers(start_direction))
 
     def disconnect_google_drive_account(self) -> None:
@@ -4656,12 +4782,21 @@ class MainWindow(QMainWindow):
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
-        disconnect_google_drive()
+        remote_name = self.active_google_remote()
+        account = next(
+            (item for item in google_drive_accounts() if item.remote_name == remote_name),
+            None,
+        )
+        disconnect_google_drive(remote_name=remote_name)
+        self._shared_drive_ids_cache.pop(remote_name, None)
+        self.settings.remove("active_google_drive_remote")
         if is_rclone_remote_path(self.upload_destination.text()):
             self.upload_destination.clear()
             self.settings.setValue("upload_destination", "")
         self.refresh_google_drive_status()
-        self.append_log("Google Drive OAuth2: подключение удалено.\n")
+        self.append_log(
+            f"Google Drive OAuth2: подключение {account.label if account else remote_name} удалено.\n"
+        )
 
     def _stop_orphaned_rclone_processes(self) -> int:
         """Stop only stale Rclone processes that belong to this Neon installation."""
@@ -5128,7 +5263,7 @@ class MainWindow(QMainWindow):
             rclone_index = self.copy_engine_combo.findData("rclone")
             if rclone_index >= 0:
                 self.copy_engine_combo.setCurrentIndex(rclone_index)
-            if not google_drive_connected():
+            if not self.google_drive_is_connected():
                 self._cloud_picker_request = (direction, folder)
                 self.start_google_drive_oauth()
         else:
@@ -5151,29 +5286,37 @@ class MainWindow(QMainWindow):
         if not parsed:
             raise ValueError("Сначала выберите конечную папку Google Drive в Проводнике.")
         kind, drive_name, _names = parsed
+        remote_name = self.active_google_remote()
         shared_ids: dict[str, str] = {}
         if kind == "shared":
             target = explorer_shared_drive_target(value)
-            if self._shared_drive_ids_cache is None:
+            if remote_name not in self._shared_drive_ids_cache:
                 executable = self.resolved_rclone_executable()
                 if not executable:
                     raise ValueError("Встроенный Rclone не найден. Переустановите его в настройках.")
-                self._shared_drive_ids_cache = DriveClient(executable).shared_drive_ids()
-            shared_ids = self._shared_drive_ids_cache
+                self._shared_drive_ids_cache[remote_name] = DriveClient(
+                    executable, remote_name
+                ).shared_drive_ids()
+            shared_ids = self._shared_drive_ids_cache[remote_name]
             available_ids = set(shared_ids.values())
             if target is not None:
                 if target.drive_id not in available_ids:
                     drive = Path(value).drive or value[:2]
                     raise SharedDriveAccessError(drive_name, drive)
                 return remote_from_explorer_path(
-                    value, shared_ids, shared_target=target
+                    value,
+                    shared_ids,
+                    shared_target=target,
+                    remote_name=remote_name,
                 )
             if drive_name.casefold() not in {
                 name.casefold() for name in shared_ids
             }:
                 drive = Path(value).drive or value[:2]
                 raise SharedDriveAccessError(drive_name, drive)
-        return remote_from_explorer_path(value, shared_ids)
+        return remote_from_explorer_path(
+            value, shared_ids, remote_name=remote_name
+        )
 
     def choose_destination(self) -> bool:
         return self.choose_destination_for("download")
@@ -5500,7 +5643,7 @@ class MainWindow(QMainWindow):
                 panel.destination.setText(explorer_destination_text)
                 self.show_transfer_direction(direction)
         if direct_google:
-            if not google_drive_connected():
+            if not self.google_drive_is_connected():
                 self._cloud_picker_request = (direction, explorer_destination_text)
                 self._start_after_google_oauth = direction
                 self.start_google_drive_oauth()
@@ -5550,7 +5693,7 @@ class MainWindow(QMainWindow):
                     "Нажмите кнопку «Google Drive» рядом с полем назначения.",
                 )
                 return
-            if not google_drive_connected():
+            if not self.google_drive_is_connected():
                 QMessageBox.warning(
                     self,
                     APP_NAME,
@@ -6096,18 +6239,42 @@ class MainWindow(QMainWindow):
                     if task.started_at is not None and task.finished_at is None:
                         task.samples.append((now, task.downloaded))
                 panel.pause_button.setText("ПАУЗА")
+                panel.visible_stop_button.setText("Остановить")
+                panel.visible_stop_button.setProperty("colorRole", "danger")
                 operation = "ВЫГРУЗКА" if self.active_transfer == "upload" else "ЗАГРУЗКА"
                 self.set_state(f"●  {operation}")
-                self.append_log("▶ Все активные загрузки продолжены.\n")
+                for source, task in self.tasks.items():
+                    if source in self.workers and task.finished_at is None:
+                        task.status = "РАБОТАЕТ"
+                        self.sync_files_overview_row(self.active_transfer, source)
+                self.append_log(
+                    "▶ Передачи продолжены в тех же процессах и с тех же активных сессий.\n"
+                )
             else:
                 for worker in self.workers.values():
                     worker.suspend()
                 self.paused = True
                 panel.pause_button.setText("ПРОДОЛЖИТЬ")
+                panel.visible_stop_button.setText("Продолжить")
+                panel.visible_stop_button.setProperty("colorRole", "upload")
                 self.set_state("●  ПАУЗА")
-                self.append_log("Ⅱ Все активные загрузки приостановлены.\n")
+                for source, task in self.tasks.items():
+                    if source in self.workers and task.finished_at is None:
+                        task.status = "ОСТАНОВЛЕНО · МОЖНО ПРОДОЛЖИТЬ"
+                        self.sync_files_overview_row(self.active_transfer, source)
+                self.append_log(
+                    "Ⅱ Передачи остановлены без закрытия процессов. Нажмите «Продолжить» — "
+                    "Rclone сохранит текущую resumable-сессию, Robocopy /Z и Turbo сохранят своё место.\n"
+                )
         except psutil.Error as exc:
             self.append_log(f"Не удалось изменить состояние процесса: {exc}\n")
+
+    def toggle_resumable_stop(self) -> None:
+        """Pause active sessions; cancel only a queue that has not started yet."""
+        if self.workers:
+            self.toggle_pause()
+        elif self.queue:
+            self.stop_now()
 
     def toggle_stop_after(self) -> None:
         if not self.workers:
@@ -6171,6 +6338,8 @@ class MainWindow(QMainWindow):
         self.set_transfer_controls_enabled(False)
         panel = self.current_transfer_panel()
         panel.pause_button.setText("ПАУЗА")
+        panel.visible_stop_button.setText("Остановить")
+        panel.visible_stop_button.setProperty("colorRole", "danger")
         panel.after_button.setText("ПОСЛЕ ФАЙЛА")
         panel.after_button.setToolTip("Остановить очередь после завершения текущего файла")
         self.update_start_button()

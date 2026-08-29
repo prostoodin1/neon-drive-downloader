@@ -2,20 +2,20 @@
 
 ### Ваши файлы. Понятная передача. Windows + macOS.
 
-![Version](https://img.shields.io/badge/version-5.5.0--beta.9-4285F4)
+![Version](https://img.shields.io/badge/version-5.5.0--beta.10-4285F4)
 ![Windows](https://img.shields.io/badge/Windows-10%20%2F%2011-34A853)
 ![macOS](https://img.shields.io/badge/macOS-12%2B-FBBC04)
 ![Channel](https://img.shields.io/badge/channel-beta-EA4335)
 
-## Скачать Beta 9
+## Скачать Beta 10
 
 | Система | Приложение со встроенным Rclone | Менеджер версий |
 | :--- | :--- | :--- |
-| 🪟 **Windows 10 / 11 · x64** | [⬇ Скачать Setup.exe](https://github.com/prostoodin1/neon-drive-downloader/releases/download/v5.5.0-beta.9/NeonDrive-Setup.exe) | [⬇ Скачать Installer.exe](https://github.com/prostoodin1/neon-drive-downloader/releases/download/v5.5.0-beta.9/NeonDriveInstaller.exe) |
-| 🍎 **Mac · Apple Silicon** | [⬇ Скачать приложение ARM64.dmg](https://github.com/prostoodin1/neon-drive-downloader/releases/download/v5.5.0-beta.9/NeonDrive-macOS-arm64.dmg) | [⬇ Скачать установщик ARM64.dmg](https://github.com/prostoodin1/neon-drive-downloader/releases/download/v5.5.0-beta.9/NeonDriveInstaller-macOS-arm64.dmg) |
-| 💻 **Mac · Intel** | [⬇ Скачать приложение x64.dmg](https://github.com/prostoodin1/neon-drive-downloader/releases/download/v5.5.0-beta.9/NeonDrive-macOS-x64.dmg) | [⬇ Скачать установщик x64.dmg](https://github.com/prostoodin1/neon-drive-downloader/releases/download/v5.5.0-beta.9/NeonDriveInstaller-macOS-x64.dmg) |
+| 🪟 **Windows 10 / 11 · x64** | [⬇ Скачать Setup.exe](https://github.com/prostoodin1/neon-drive-downloader/releases/download/v5.5.0-beta.10/NeonDrive-Setup.exe) | [⬇ Скачать Installer.exe](https://github.com/prostoodin1/neon-drive-downloader/releases/download/v5.5.0-beta.10/NeonDriveInstaller.exe) |
+| 🍎 **Mac · Apple Silicon** | [⬇ Скачать приложение ARM64.dmg](https://github.com/prostoodin1/neon-drive-downloader/releases/download/v5.5.0-beta.10/NeonDrive-macOS-arm64.dmg) | [⬇ Скачать установщик ARM64.dmg](https://github.com/prostoodin1/neon-drive-downloader/releases/download/v5.5.0-beta.10/NeonDriveInstaller-macOS-arm64.dmg) |
+| 💻 **Mac · Intel** | [⬇ Скачать приложение x64.dmg](https://github.com/prostoodin1/neon-drive-downloader/releases/download/v5.5.0-beta.10/NeonDrive-macOS-x64.dmg) | [⬇ Скачать установщик x64.dmg](https://github.com/prostoodin1/neon-drive-downloader/releases/download/v5.5.0-beta.10/NeonDriveInstaller-macOS-x64.dmg) |
 
-**Для Windows:** [установить Neon Drive](https://github.com/prostoodin1/neon-drive-downloader/releases/download/v5.5.0-beta.9/NeonDrive-Setup.exe) · [менеджер новых и старых версий](https://github.com/prostoodin1/neon-drive-downloader/releases/download/v5.5.0-beta.9/NeonDriveInstaller.exe).
+**Для Windows:** [установить Neon Drive](https://github.com/prostoodin1/neon-drive-downloader/releases/download/v5.5.0-beta.10/NeonDrive-Setup.exe) · [менеджер новых и старых версий](https://github.com/prostoodin1/neon-drive-downloader/releases/download/v5.5.0-beta.10/NeonDriveInstaller.exe).
 
 [Все версии и изменения →](https://github.com/prostoodin1/neon-drive-downloader/releases)
 · [Сообщить об ошибке →](https://github.com/prostoodin1/neon-drive-downloader/issues)
@@ -29,7 +29,13 @@ Neon Drive — независимое приложение, не продукт 
 
 ![Neon Drive Beta 8 — настоящие виджеты приложения](docs/images/beta8-dark.png)
 
-## Новое в Beta 9
+## Новое в Beta 10
+
+- **Несколько Google-аккаунтов:** добавляйте личные, Workspace и командные
+  подключения, выбирайте активное и удаляйте или переподключайте каждое отдельно.
+- **Настоящее «Остановить → Продолжить»:** активный Rclone не закрывается, поэтому
+  продолжение использует тот же PID и resumable-сессию во всех шаблонах. Для этого
+  Neon должен оставаться запущенным; жёсткая отмена доступна в Advanced mode.
 
 - **Проводник сначала, Rclone потом:** конечная папка выбирается в обычном
   Проводнике/Finder и остаётся видимой в поле «Куда». Только при запуске Neon
@@ -45,7 +51,8 @@ Neon Drive — независимое приложение, не продукт 
   предлагает прямую выгрузку по OAuth2 или обычное копирование через клиент Google.
   В настройках можно выбрать «спрашивать», «напрямую» или «обычное копирование».
 - **«Остановить» рядом со стартом** на страницах загрузки и выгрузки, без открытия
-  терминала. Останавливает активную передачу и оставшуюся очередь.
+  терминала. Активная передача сохраняет сессию для продолжения; ещё не начатая
+  очередь отменяется обычным образом.
 - **«Выбрать файл» заменяет список**, а «Добавить файлы» явно дополняет его.
 - **«Экстрим»** — отдельный шаблон с чанком Google Drive 1024 МиБ (1 ГиБ).
   Для такого чанка применяется одна одновременная выгрузка файла.
@@ -67,8 +74,9 @@ Neon Drive — независимое приложение, не продукт 
 Например, путь `H:/Unidades compartidas/Clients Materials/Test carpet` Neon
 пытается сопоставить с общим диском **Clients Materials** и папкой **Test carpet**.
 Для «Моего диска» путь преобразуется без запросов списка облачных папок. Для
-общего диска Neon один раз сопоставляет только имя диска с его ID и сохраняет его;
-вложенные папки повторно не обходятся. Отмена сохраняет исходный путь.
+общего диска на Windows Neon читает точные ID диска и выбранной папки из локального
+кэша Google Drive for desktop только для чтения; вложенные папки по имени не
+обходятся. Отмена сохраняет исходный путь.
 
 Список общих дисков зависит от подключённого OAuth-аккаунта и его прав.
 Если диск не виден, проверьте, что Neon и клиент Google используют нужный аккаунт.

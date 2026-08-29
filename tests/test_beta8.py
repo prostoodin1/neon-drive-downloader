@@ -139,7 +139,7 @@ class Beta8Tests(unittest.TestCase):
         self.assertEqual(window.queue, [])
         self.assertTrue(window.stopping)
 
-    def test_visible_stop_ends_real_rclone_without_modifying_source(self):
+    def test_visible_stop_resumes_same_rclone_process_without_restarting_file(self):
         executable = Path("vendor/rclone/rclone.exe" if os.name == "nt" else "vendor/rclone/rclone")
         if not executable.is_file():
             self.skipTest("Bundled Rclone is fetched in the build step.")
@@ -151,7 +151,7 @@ class Beta8Tests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             source = root / "source.bin"
-            source.write_bytes(b"neon" * 4 * 1024 * 1024)
+            source.write_bytes(b"neon" * 1024 * 1024)
             digest = hashlib.sha256(source.read_bytes()).digest()
             window = self.window()
             window.auto_health_timer.stop()
@@ -170,19 +170,28 @@ class Beta8Tests(unittest.TestCase):
                         QTest.qWait(30)
                     self.assertTrue(window.workers, window.terminal.toPlainText())
                     QTest.qWait(200)
-                    workers = list(window.workers.values())
+                    worker = next(iter(window.workers.values()))
+                    original_pid = worker.processId()
                     panel.visible_stop_button.click()
-                    deadline = time.monotonic() + 8
+                    self.assertTrue(window.running)
+                    self.assertTrue(window.paused)
+                    self.assertEqual(panel.visible_stop_button.text(), "Продолжить")
+                    QTest.qWait(250)
+                    self.assertEqual(worker.processId(), original_pid)
+                    panel.visible_stop_button.click()
+                    self.assertFalse(window.paused)
+                    self.assertEqual(worker.processId(), original_pid)
+                    deadline = time.monotonic() + 12
                     while window.running and time.monotonic() < deadline:
                         QTest.qWait(30)
-                    for worker in workers:
-                        if isValid(worker) and worker.processId():
-                            worker.kill()
-                            worker.waitForFinished(2000)
                     self.assertFalse(window.running, window.terminal.toPlainText())
                     self.assertFalse(window.workers)
-                    self.assertEqual(window.completed_items, 0)
+                    self.assertEqual(window.completed_items, 1)
                     self.assertFalse(list(destination.glob(".neon-buffer-*")))
+                    self.assertEqual(
+                        hashlib.sha256((destination / source.name).read_bytes()).digest(),
+                        digest,
+                    )
                     self.assertEqual(hashlib.sha256(source.read_bytes()).digest(), digest)
 
     def test_google_button_uses_explorer_and_keeps_selected_path(self):

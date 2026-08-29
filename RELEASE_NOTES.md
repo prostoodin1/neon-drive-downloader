@@ -1,7 +1,16 @@
-# Neon Drive 5.5.0 Beta 9
+# Neon Drive 5.5.0 Beta 10
 
 ## Исправления и новые возможности
 
+- Можно подключить несколько Google-аккаунтов одновременно. В настройках появился
+  список подключений, выбор активного аккаунта, отдельные кнопки добавления,
+  переподключения и удаления, а также типы «Личный», «Рабочий / Workspace» и
+  «Общий / команда». Старое одиночное подключение сохраняется как первый профиль.
+- Во всех шаблонах кнопка «Остановить» при активной передаче теперь приостанавливает
+  существующий процесс, а «Продолжить» возобновляет тот же PID и ту же Rclone
+  resumable-сессию. Robocopy сохраняет `/Z`, Turbo — карту завершённых сегментов.
+  Жёсткая отмена остаётся в Advanced mode; полностью закрытый процесс Google Drive
+  возобновить нельзя, поэтому для докачки Neon должен оставаться запущенным.
 - Конечная папка Google Drive теперь сначала выбирается в обычном Проводнике/Finder.
   Путь остаётся видимым, а Neon преобразует его для Rclone только при запуске.
   Отдельное облачное окно и обход всех папок больше не используются.
@@ -45,9 +54,9 @@
 
 | Система | Приложение со встроенным Rclone | Менеджер версий |
 | :--- | :--- | :--- |
-| 🪟 **Windows 10 / 11 · x64** | [⬇ Скачать Setup.exe](https://github.com/prostoodin1/neon-drive-downloader/releases/download/v5.5.0-beta.9/NeonDrive-Setup.exe) | [⬇ Скачать Installer.exe](https://github.com/prostoodin1/neon-drive-downloader/releases/download/v5.5.0-beta.9/NeonDriveInstaller.exe) |
-| 🍎 **Mac · Apple Silicon** | [⬇ Скачать приложение ARM64.dmg](https://github.com/prostoodin1/neon-drive-downloader/releases/download/v5.5.0-beta.9/NeonDrive-macOS-arm64.dmg) | [⬇ Скачать установщик ARM64.dmg](https://github.com/prostoodin1/neon-drive-downloader/releases/download/v5.5.0-beta.9/NeonDriveInstaller-macOS-arm64.dmg) |
-| 💻 **Mac · Intel** | [⬇ Скачать приложение x64.dmg](https://github.com/prostoodin1/neon-drive-downloader/releases/download/v5.5.0-beta.9/NeonDrive-macOS-x64.dmg) | [⬇ Скачать установщик x64.dmg](https://github.com/prostoodin1/neon-drive-downloader/releases/download/v5.5.0-beta.9/NeonDriveInstaller-macOS-x64.dmg) |
+| 🪟 **Windows 10 / 11 · x64** | [⬇ Скачать Setup.exe](https://github.com/prostoodin1/neon-drive-downloader/releases/download/v5.5.0-beta.10/NeonDrive-Setup.exe) | [⬇ Скачать Installer.exe](https://github.com/prostoodin1/neon-drive-downloader/releases/download/v5.5.0-beta.10/NeonDriveInstaller.exe) |
+| 🍎 **Mac · Apple Silicon** | [⬇ Скачать приложение ARM64.dmg](https://github.com/prostoodin1/neon-drive-downloader/releases/download/v5.5.0-beta.10/NeonDrive-macOS-arm64.dmg) | [⬇ Скачать установщик ARM64.dmg](https://github.com/prostoodin1/neon-drive-downloader/releases/download/v5.5.0-beta.10/NeonDriveInstaller-macOS-arm64.dmg) |
+| 💻 **Mac · Intel** | [⬇ Скачать приложение x64.dmg](https://github.com/prostoodin1/neon-drive-downloader/releases/download/v5.5.0-beta.10/NeonDrive-macOS-x64.dmg) | [⬇ Скачать установщик x64.dmg](https://github.com/prostoodin1/neon-drive-downloader/releases/download/v5.5.0-beta.10/NeonDriveInstaller-macOS-x64.dmg) |
 
 [Все версии и изменения](https://github.com/prostoodin1/neon-drive-downloader/releases).
 
@@ -64,7 +73,7 @@ macOS **12+**, отдельные ARM64 и Intel DMG приложения и м�
 используйте [инструкцию Apple](https://support.apple.com/en-euro/102445),
 если доверяете приложению. Защита системы автоматически не отключается.
 
-Проверки: 141 регрессионный тест, реальное чтение «Моего диска» через OAuth без изменения
+Проверки: 144 регрессионных теста, реальное чтение «Моего диска» через OAuth без изменения
 облачных файлов, локальные передачи встроенным Rclone, контроль хешей, отмена и
 проверки собранных пакетов. Конкретный общий диск Clients Materials недоступен
 подключённому тестовому аккаунту; выгрузка 25 ГБ на него не проверялась.
