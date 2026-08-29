@@ -1,8 +1,12 @@
 #ifndef MyAppVersion
-  #define MyAppVersion "5.3.0"
+  #define MyAppVersion "5.5.0-beta.9"
 #endif
 
-#define MyAppName "Neon Drive Downloader"
+#ifndef MyAppFileVersion
+  #define MyAppFileVersion "5.5.0.9"
+#endif
+
+#define MyAppName "Neon Drive"
 #define MyAppExeName "NeonDriveDownloader.exe"
 
 [Setup]
@@ -18,7 +22,7 @@ DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
 PrivilegesRequired=lowest
 OutputDir=dist
-OutputBaseFilename=NeonDriveDownloader-Setup
+OutputBaseFilename=NeonDrive-Setup
 SetupIconFile=assets\neon-drive-v2.ico
 UninstallDisplayIcon={app}\{#MyAppExeName}
 Compression=lzma2/ultra64
@@ -28,9 +32,9 @@ CloseApplications=yes
 RestartApplications=yes
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
-VersionInfoVersion={#MyAppVersion}
+VersionInfoVersion={#MyAppFileVersion}
 VersionInfoProductName={#MyAppName}
-VersionInfoDescription=Reliable Google Drive background downloader
+VersionInfoDescription=Fast and reliable transfers for Explorer-connected drives
 
 [Languages]
 Name: "russian"; MessagesFile: "compiler:Languages\Russian.isl"
@@ -40,10 +44,23 @@ Name: "desktopicon"; Description: "Создать ярлык на рабочем
 
 [Files]
 Source: "dist\NeonDriveDownloader\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "dist\NeonDriveInstaller.exe"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
+Name: "{autoprograms}\Neon Drive Installer"; Filename: "{app}\NeonDriveInstaller.exe"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
+
+[Registry]
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\App Paths\NeonDriveCLI.exe"; ValueType: string; ValueName: ""; ValueData: "{app}\NeonDriveCLI.exe"; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\App Paths\NeonDriveCLI.exe"; ValueType: string; ValueName: "Path"; ValueData: "{app}"; Flags: uninsdeletevalue
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "Запустить {#MyAppName}"; Flags: nowait postinstall skipifsilent
+
+[Code]
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+begin
+  if CurUninstallStep = usUninstall then
+    RegDeleteValue(HKCU, 'Software\Microsoft\Windows\CurrentVersion\Run', 'Neon Drive');
+end;

@@ -1,37 +1,59 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
+import platform
 import re
 import shutil
 import subprocess
 import sys
 import urllib.error
 import urllib.request
+from datetime import datetime, timezone
 from pathlib import Path
 
 import psutil
 from PySide6.QtCore import QThread, Signal
 
 from . import __version__
+from .network import https_context
+from .platform_support import app_data_directory, is_macos
 
 
 REPOSITORY = "prostoodin1/neon-drive-downloader"
-SETUP_ASSET_NAME = "NeonDriveDownloader-Setup.exe"
+SETUP_ASSET_NAME = "NeonDrive-Setup.exe"
+PREVIOUS_SETUP_ASSET_NAME = "NeonDriveDownloader-Setup.exe"
 LEGACY_ASSET_NAME = "NeonDriveDownloader.exe"
-ASSET_NAMES = (SETUP_ASSET_NAME, LEGACY_ASSET_NAME)
+MACOS_ASSET_NAME = "NeonDrive-macOS-x64.dmg"
+MACOS_ARM_ASSET_NAME = "NeonDrive-macOS-arm64.dmg"
+SETUP_ASSET_NAMES = (SETUP_ASSET_NAME, PREVIOUS_SETUP_ASSET_NAME)
+ASSET_NAMES = (*SETUP_ASSET_NAMES, LEGACY_ASSET_NAME, MACOS_ASSET_NAME, MACOS_ARM_ASSET_NAME)
 API_URL = f"https://api.github.com/repos/{REPOSITORY}/releases/latest"
-RELEASES_URL = f"https://api.github.com/repos/{REPOSITORY}/releases?per_page=20"
+RELEASES_URL = f"https://api.github.com/repos/{REPOSITORY}/releases?per_page=100"
+CATALOG_URL = f"https://raw.githubusercontent.com/{REPOSITORY}/main/release-catalog.json"
+LAST_DOWNLOAD_DIRECTORY = "last-download"
+LAST_DOWNLOAD_METADATA = "release.json"
 
 
 def app_data_dir() -> Path:
-    base = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
-    return base / "NeonDriveDownloader"
+    return app_data_directory()
 
 
 def version_tuple(value: str) -> tuple[int, ...]:
-    numbers = re.findall(r"\d+", value.lstrip("vV"))
-    return tuple(int(number) for number in numbers[:4]) or (0,)
+    raw = value.lstrip("vV").split("+", 1)[0]
+    core, separator, prerelease = raw.partition("-")
+    numbers = [int(number) for number in re.findall(r"\d+", core)[:4]]
+    while len(numbers) < 3:
+        numbers.append(0)
+    if not numbers:
+        numbers = [0, 0, 0]
+    if not separator:
+        return (*numbers, 1)
+    label = prerelease.casefold()
+    rank = 2 if "rc" in label else 1 if "beta" in label else 0
+    suffix_numbers = tuple(int(number) for number in re.findall(r"\d+", prerelease)) or (0,)
+    return (*numbers, 0, rank, *suffix_numbers)
 
 
 def running_onefile() -> bool:
@@ -39,63 +61,89 @@ def running_onefile() -> bool:
     return bool(getattr(sys, "frozen", False) and bundle_dir.name.upper().startswith("_MEI"))
 
 
-def gh_path() -> str | None:
-    found = shutil.which("gh")
-    if found:
-        return found
-    candidates = (
-        Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "GitHub CLI" / "gh.exe",
-        Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "GitHub CLI" / "gh.exe",
-        Path(os.environ.get("LOCALAPPDATA", "")) / "Microsoft" / "WinGet" / "Links" / "gh.exe",
-    )
-    return next((str(path) for path in candidates if path.is_file()), None)
-
-
 def _public_json(url: str) -> object:
     request = urllib.request.Request(
         url,
         headers={"Accept": "application/vnd.github+json", "User-Agent": "NeonDriveDownloader"},
     )
-    with urllib.request.urlopen(request, timeout=15) as response:
+    with urllib.request.urlopen(request, timeout=15, context=https_context()) as response:
         data = json.loads(response.read().decode("utf-8"))
     return data
 
 
-def _private_json(endpoint: str) -> object:
-    executable = gh_path()
-    if not executable:
-        raise RuntimeError(
-            "Приватный репозиторий требует GitHub CLI. Установите gh и выполните gh auth login."
-        )
-    result = subprocess.run(
-        [executable, "api", endpoint],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        timeout=20,
-        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-    )
-    if result.returncode != 0:
-        message = result.stderr.strip() or result.stdout.strip() or "GitHub API недоступен"
-        raise RuntimeError(message)
-    return json.loads(result.stdout)
-
-
 def _release_data(latest: bool = True) -> tuple[object, str]:
     url = API_URL if latest else RELEASES_URL
-    endpoint = f"repos/{REPOSITORY}/releases/latest" if latest else f"repos/{REPOSITORY}/releases?per_page=20"
     try:
-        return _public_json(url), "public"
-    except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, json.JSONDecodeError):
-        return _private_json(endpoint), "gh"
+        data = _public_json(url)
+        if not isinstance(data, (dict, list)):
+            raise ValueError("Некорректный список релизов")
+        _cache_release_data(data)
+        return data, "public"
+    except (
+        urllib.error.HTTPError,
+        urllib.error.URLError,
+        TimeoutError,
+        json.JSONDecodeError,
+        OSError,
+        ValueError,
+    ):
+        pass
+    try:
+        data = _public_json(CATALOG_URL)
+        selected = _select_catalog(data, latest)
+        _cache_release_data(data)
+        return selected, "public-catalog"
+    except (OSError, ValueError, RuntimeError):
+        pass
+    try:
+        data = json.loads((app_data_dir() / "releases-cache.json").read_text(encoding="utf-8"))
+        return _select_catalog(data, latest), "cached"
+    except (OSError, ValueError, RuntimeError) as exc:
+        raise RuntimeError(
+            "Публичный список версий GitHub временно недоступен. "
+            "Вход в GitHub и GitHub CLI для установки Neon Drive не требуются. "
+            "Повторите запрос или выберите уже скачанный пакет кнопкой «Установить файл…»."
+        ) from exc
+
+
+def _select_catalog(data: object, latest: bool) -> object:
+    if not isinstance(data, list) or not data:
+        raise ValueError("Пустой или некорректный каталог")
+    releases = [item for item in data if isinstance(item, dict) and item.get("tag_name") and not item.get("draft")]
+    if not releases:
+        raise ValueError("Нет опубликованных версий")
+    if not latest:
+        return releases
+    stable = [item for item in releases if not item.get("prerelease")]
+    if not stable:
+        raise ValueError("Нет стабильных версий")
+    return max(stable, key=lambda item: version_tuple(item["tag_name"]))
+
+
+def _cache_release_data(data: object) -> None:
+    if not isinstance(data, list):
+        return
+    try:
+        _select_catalog(data, False)
+        directory = app_data_dir()
+        directory.mkdir(parents=True, exist_ok=True)
+        temporary = directory / "releases-cache.download"
+        temporary.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        temporary.replace(directory / "releases-cache.json")
+    except (OSError, ValueError):
+        pass
 
 
 def _normalize_release(data: dict, method: str) -> dict:
     tag = str(data.get("tag_name", ""))
     assets = data.get("assets") or []
+    preferred_names = (
+        ((MACOS_ARM_ASSET_NAME, MACOS_ASSET_NAME) if platform.machine().lower() in ("arm64", "aarch64") else (MACOS_ASSET_NAME,))
+        if is_macos()
+        else (*SETUP_ASSET_NAMES, LEGACY_ASSET_NAME)
+    )
     asset = next(
-        (item for name in ASSET_NAMES for item in assets if item.get("name") == name),
+        (item for name in preferred_names for item in assets if item.get("name") == name),
         None,
     )
     if not tag or not asset:
@@ -104,7 +152,7 @@ def _normalize_release(data: dict, method: str) -> dict:
         )
     asset_name = str(asset.get("name") or LEGACY_ASSET_NAME)
     migration = (
-        asset_name == SETUP_ASSET_NAME
+        asset_name in SETUP_ASSET_NAMES
         and running_onefile()
         and version_tuple(tag) == version_tuple(__version__)
     )
@@ -116,7 +164,9 @@ def _normalize_release(data: dict, method: str) -> dict:
         "published_at": data.get("published_at") or data.get("created_at") or "",
         "asset_url": asset.get("browser_download_url") or "",
         "asset_name": asset_name,
+        "digest": str(asset.get("digest") or ""),
         "method": method,
+        "prerelease": bool(data.get("prerelease")),
         "available": version_tuple(tag) > version_tuple(__version__) or migration,
         "migration": migration,
         "current_version": __version__,
@@ -124,6 +174,24 @@ def _normalize_release(data: dict, method: str) -> dict:
 
 
 def latest_release() -> dict:
+    # GitHub's /releases/latest endpoint deliberately excludes prereleases.
+    # Beta builds must inspect the release list so the next beta is visible in-app.
+    if "-" in __version__:
+        data, method = _release_data(latest=False)
+        if not isinstance(data, list):
+            raise RuntimeError("GitHub вернул некорректный список релизов.")
+        candidates: list[dict] = []
+        for item in data:
+            if not isinstance(item, dict) or item.get("draft"):
+                continue
+            try:
+                candidates.append(_normalize_release(item, method))
+            except RuntimeError:
+                continue
+        if not candidates:
+            raise RuntimeError("Подходящие GitHub Releases не найдены.")
+        return max(candidates, key=lambda release: version_tuple(str(release["version"])))
+
     data, method = _release_data(latest=True)
     if not isinstance(data, dict):
         raise RuntimeError("GitHub вернул некорректные данные последнего релиза.")
@@ -147,50 +215,79 @@ def release_history() -> list[dict]:
     return releases
 
 
+def last_downloaded_release() -> dict | None:
+    cache_dir = app_data_dir() / "updates" / LAST_DOWNLOAD_DIRECTORY
+    metadata_path = cache_dir / LAST_DOWNLOAD_METADATA
+    try:
+        data = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    asset_name = str(data.get("asset_name") or "")
+    if asset_name not in ASSET_NAMES:
+        return None
+    cached_file = cache_dir / asset_name
+    if not cached_file.is_file() or cached_file.stat().st_size < 1_000_000:
+        return None
+    return {
+        "tag": str(data.get("tag") or ""),
+        "version": str(data.get("version") or data.get("tag") or "").lstrip("vV"),
+        "asset_name": asset_name,
+        "downloaded_at": str(data.get("downloaded_at") or ""),
+        "path": str(cached_file),
+    }
+
+
 def download_release(release: dict) -> Path:
     update_dir = app_data_dir() / "updates"
     update_dir.mkdir(parents=True, exist_ok=True)
     asset_name = str(release.get("asset_name") or LEGACY_ASSET_NAME)
     if asset_name not in ASSET_NAMES:
         raise RuntimeError("GitHub Release содержит неподдерживаемый формат обновления.")
-    destination = update_dir / asset_name
-    destination.unlink(missing_ok=True)
-    if release.get("method") == "gh":
-        executable = gh_path()
-        if not executable:
-            raise RuntimeError("GitHub CLI больше не доступен.")
-        result = subprocess.run(
-            [
-                executable,
-                "release",
-                "download",
-                release["tag"],
-                "--repo",
-                REPOSITORY,
-                "--pattern",
-                asset_name,
-                "--dir",
-                str(update_dir),
-                "--clobber",
-            ],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=600,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-        )
-        if result.returncode != 0:
-            raise RuntimeError(result.stderr.strip() or "Не удалось скачать Release через GitHub CLI.")
-    else:
-        request = urllib.request.Request(
-            release["asset_url"],
-            headers={"User-Agent": "NeonDriveDownloader"},
-        )
-        with urllib.request.urlopen(request, timeout=60) as response, destination.open("wb") as stream:
-            shutil.copyfileobj(response, stream)
-    if not destination.is_file() or destination.stat().st_size < 1_000_000:
+    staging_dir = update_dir / "downloading"
+    staging_dir.mkdir(parents=True, exist_ok=True)
+    staged = staging_dir / asset_name
+    staged.unlink(missing_ok=True)
+    asset_url = str(release.get("asset_url") or "")
+    if not asset_url.startswith("https://"):
+        raise RuntimeError("У выбранной версии отсутствует публичная ссылка на установщик.")
+    request = urllib.request.Request(
+        asset_url,
+        headers={"User-Agent": "NeonDriveDownloader"},
+    )
+    with urllib.request.urlopen(request, timeout=60, context=https_context()) as response, staged.open("wb") as stream:
+        shutil.copyfileobj(response, stream)
+    if not staged.is_file() or staged.stat().st_size < 1_000_000:
         raise RuntimeError("Загруженный файл обновления отсутствует или повреждён.")
+    digest = str(release.get("digest") or "")
+    if digest.startswith("sha256:"):
+        with staged.open("rb") as stream:
+            actual = "sha256:" + hashlib.file_digest(stream, "sha256").hexdigest()
+        if actual != digest.lower():
+            staged.unlink(missing_ok=True)
+            raise RuntimeError("Контрольная сумма установщика не совпала. Предыдущий пакет сохранён; повторите загрузку.")
+    cache_dir = update_dir / LAST_DOWNLOAD_DIRECTORY
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    destination = cache_dir / asset_name
+    destination.unlink(missing_ok=True)
+    staged.replace(destination)
+    for old_asset in ASSET_NAMES:
+        if old_asset != asset_name:
+            (cache_dir / old_asset).unlink(missing_ok=True)
+    metadata = {
+        "tag": str(release.get("tag") or release.get("version") or ""),
+        "version": str(release.get("version") or release.get("tag") or "").lstrip("vV"),
+        "asset_name": asset_name,
+        "downloaded_at": datetime.now(timezone.utc).isoformat(),
+    }
+    metadata_path = cache_dir / LAST_DOWNLOAD_METADATA
+    metadata_temporary = metadata_path.with_suffix(".download")
+    metadata_temporary.write_text(
+        json.dumps(metadata, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    metadata_temporary.replace(metadata_path)
     return destination
 
 
@@ -213,9 +310,12 @@ def bootloader_parent_pid(current_executable: Path) -> int:
 
 def launch_replacement(downloaded: Path, current_executable: Path) -> None:
     if not getattr(sys, "frozen", False):
-        raise RuntimeError("Автоустановка доступна только в собранной EXE-версии.")
+        raise RuntimeError("Автоустановка доступна только в собранной версии Neon Drive.")
+    if is_macos() and downloaded.name in (MACOS_ASSET_NAME, MACOS_ARM_ASSET_NAME):
+        subprocess.Popen(["open", str(downloaded)], close_fds=True)
+        return
     pid_to_wait = bootloader_parent_pid(current_executable)
-    if downloaded.name.casefold() == SETUP_ASSET_NAME.casefold():
+    if downloaded.name.casefold() in {name.casefold() for name in SETUP_ASSET_NAMES}:
         bundle_dir = Path(str(getattr(sys, "_MEIPASS", "")))
         if bundle_dir.name == "_internal":
             install_dir = current_executable.parent
@@ -223,7 +323,7 @@ def launch_replacement(downloaded: Path, current_executable: Path) -> None:
             install_dir = (
                 Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
                 / "Programs"
-                / "Neon Drive Downloader"
+                / "Neon Drive"
             )
         script = downloaded.parent / "apply-setup-update.ps1"
         script.write_text(
@@ -236,7 +336,6 @@ if($installer.ExitCode -ne 0){exit $installer.ExitCode}
 $target = Join-Path $InstallDir 'NeonDriveDownloader.exe'
 if(!(Test-Path -LiteralPath $target)){exit 2}
 Start-Process -FilePath $target
-Remove-Item -LiteralPath $Source -Force -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath $ScriptPath -Force -ErrorAction SilentlyContinue
 exit 0
 """,
@@ -267,6 +366,9 @@ exit 0
         return
     if not os.access(current_executable.parent, os.W_OK):
         raise RuntimeError("Нет прав на замену EXE в текущей папке.")
+    replacement = downloaded.with_name(f"apply-{downloaded.name}")
+    replacement.unlink(missing_ok=True)
+    shutil.copy2(downloaded, replacement)
     script = downloaded.parent / "apply-update.ps1"
     script.write_text(
         """param([string]$Source,[string]$Target,[int]$PidToWait,[string]$ScriptPath)
@@ -302,9 +404,9 @@ exit 1
             "-ExecutionPolicy",
             "Bypass",
             "-File",
-            str(script),
-            "-Source",
-            str(downloaded),
+                str(script),
+                "-Source",
+                str(replacement),
             "-Target",
             str(current_executable),
             "-PidToWait",

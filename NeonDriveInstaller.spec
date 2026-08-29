@@ -1,0 +1,44 @@
+# -*- mode: python ; coding: utf-8 -*-
+
+import os
+
+# Qt uses the Windows ICU API, not an unrelated tool's versioned ICU build.
+system32 = os.path.join(os.environ.get('SystemRoot', r'C:\Windows'), 'System32')
+os.environ['PATH'] = system32 + os.pathsep + os.environ.get('PATH', '')
+
+a = Analysis(
+    ['installer_main.py'],
+    pathex=[],
+    binaries=[],
+    datas=[('assets/neon-drive-v2.png', 'assets')],
+    hiddenimports=['PySide6.QtNetwork'],
+    hookspath=[],
+    hooksconfig={},
+    runtime_hooks=[],
+    excludes=[],
+    noarchive=False,
+    optimize=0,
+)
+pyz = PYZ(a.pure)
+
+exe = EXE(
+    pyz,
+    a.scripts,
+    a.binaries,
+    a.datas,
+    [],
+    name='NeonDriveInstaller',
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    upx=False,
+    upx_exclude=[],
+    runtime_tmpdir=r'%LOCALAPPDATA%\NeonDriveDownloader\installer-runtime',
+    console=False,
+    disable_windowed_traceback=False,
+    argv_emulation=False,
+    target_arch=None,
+    codesign_identity=None,
+    entitlements_file=None,
+    icon=['assets/neon-drive-v2.ico'],
+)
