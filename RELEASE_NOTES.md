@@ -1,7 +1,18 @@
-# Neon Drive 5.6.0 Beta 1
+# Neon Drive 5.6.0 Beta 2
 
 ## Исправления и новые возможности
 
+- Папка Google Drive, выбранная в Проводнике/Finder, теперь по умолчанию
+  выгружается прямо в облако через Neon Rclone. Файл не проходит через локальную
+  копию виртуального диска и не ждёт отдельной синхронизации клиента Google.
+- Старый режим «спрашивать» при обновлении один раз переводится на прямой маршрут.
+  Явно выбранное обычное копирование через Google Drive for desktop сохраняется.
+- В Neon нет ограничения пропускной способности Rclone (`--bwlimit` не используется),
+  а прежний скрытый предел в четыре активных облачных файла удалён. Очередь может
+  использовать до десяти выбранных задач в зависимости от режима шаблона.
+- Чанк прямой выгрузки теперь настроен вместе с профилем: 64 МиБ для
+  сбалансированного, 128 МиБ для быстрого, 256 МиБ для максимального и 1 ГиБ для
+  экстремального. Новые установки начинают с быстрого профиля.
 - Прямые загрузки и выгрузки Google Drive используют более длинный таймаут,
   повтор с паузой и API-pacer Rclone. Это уменьшает провалы из-за квотных всплесков,
   не устанавливая искусственный предел скорости.
@@ -12,7 +23,7 @@
 - Файлы Google Drive, выбранные как источник в Проводнике/Finder, автоматически
   распознаются как загрузка на локальный диск и передаются напрямую через Neon Rclone.
 - Для всех шаблонов можно выбрать последовательную очередь или одновременную работу.
-  Rclone безопасно ограничен четырьмя активными выбранными файлами.
+  Rclone поддерживает до десяти активных выбранных файлов без скрытого лимита скорости.
 - Основная синяя кнопка показывает «Продолжить» при сохранённой паузе и возобновляет
   те же процессы. Robocopy `/Z` теперь включён и в максимальном шаблоне.
 - Общий график и графики отдельных файлов используют динамические зоны скорости:
@@ -70,16 +81,16 @@
 
 | Система | Приложение со встроенным Rclone | Менеджер версий |
 | :--- | :--- | :--- |
-| 🪟 **Windows 10 / 11 · x64** | [⬇ Скачать Setup.exe](https://github.com/prostoodin1/neon-drive-downloader/releases/download/v5.6.0-beta.1/NeonDrive-Setup.exe) | [⬇ Скачать Installer.exe](https://github.com/prostoodin1/neon-drive-downloader/releases/download/v5.6.0-beta.1/NeonDriveInstaller.exe) |
-| 🍎 **Mac · Apple Silicon** | [⬇ Скачать приложение ARM64.dmg](https://github.com/prostoodin1/neon-drive-downloader/releases/download/v5.6.0-beta.1/NeonDrive-macOS-arm64.dmg) | [⬇ Скачать установщик ARM64.dmg](https://github.com/prostoodin1/neon-drive-downloader/releases/download/v5.6.0-beta.1/NeonDriveInstaller-macOS-arm64.dmg) |
-| 💻 **Mac · Intel** | [⬇ Скачать приложение x64.dmg](https://github.com/prostoodin1/neon-drive-downloader/releases/download/v5.6.0-beta.1/NeonDrive-macOS-x64.dmg) | [⬇ Скачать установщик x64.dmg](https://github.com/prostoodin1/neon-drive-downloader/releases/download/v5.6.0-beta.1/NeonDriveInstaller-macOS-x64.dmg) |
+| 🪟 **Windows 10 / 11 · x64** | [⬇ Скачать Setup.exe](https://github.com/prostoodin1/neon-drive-downloader/releases/download/v5.6.0-beta.2/NeonDrive-Setup.exe) | [⬇ Скачать Installer.exe](https://github.com/prostoodin1/neon-drive-downloader/releases/download/v5.6.0-beta.2/NeonDriveInstaller.exe) |
+| 🍎 **Mac · Apple Silicon** | [⬇ Скачать приложение ARM64.dmg](https://github.com/prostoodin1/neon-drive-downloader/releases/download/v5.6.0-beta.2/NeonDrive-macOS-arm64.dmg) | [⬇ Скачать установщик ARM64.dmg](https://github.com/prostoodin1/neon-drive-downloader/releases/download/v5.6.0-beta.2/NeonDriveInstaller-macOS-arm64.dmg) |
+| 💻 **Mac · Intel** | [⬇ Скачать приложение x64.dmg](https://github.com/prostoodin1/neon-drive-downloader/releases/download/v5.6.0-beta.2/NeonDrive-macOS-x64.dmg) | [⬇ Скачать установщик x64.dmg](https://github.com/prostoodin1/neon-drive-downloader/releases/download/v5.6.0-beta.2/NeonDriveInstaller-macOS-x64.dmg) |
 
 [Все версии и изменения](https://github.com/prostoodin1/neon-drive-downloader/releases).
 
 **Экстрим:** буфер одного чанка требует примерно 1 ГиБ RAM сверх остальных расходов.
 Ускорение зависит от сети, дисков и ограничений Google; при нехватке памяти
-выбирайте меньший чанк. Обычная копия в виртуальную папку Google Drive по-прежнему
-синхронизируется клиентом Google — для его обхода выбирайте «Через Neon».
+выбирайте меньший чанк. Прямой маршрут Neon теперь выбран автоматически; обычная
+копия через клиент Google остаётся ручным вариантом в настройках.
 
 **Общие диски:** нужен Google-аккаунт с доступом. Отсутствующий диск теперь
 показывает предупреждение, не отправляя файлы в другое место.
@@ -89,7 +100,7 @@ macOS **12+**, отдельные ARM64 и Intel DMG приложения и м�
 используйте [инструкцию Apple](https://support.apple.com/en-euro/102445),
 если доверяете приложению. Защита системы автоматически не отключается.
 
-Проверки: 152 регрессионных теста, реальное чтение «Моего диска» через OAuth без изменения
+Проверки: полный регрессионный набор, реальное чтение «Моего диска» через OAuth без изменения
 облачных файлов, локальные передачи встроенным Rclone, контроль хешей, отмена и
 проверки собранных пакетов. Конкретный общий диск Clients Materials недоступен
 подключённому тестовому аккаунту; выгрузка 25 ГБ на него не проверялась.

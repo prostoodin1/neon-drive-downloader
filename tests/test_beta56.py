@@ -13,7 +13,7 @@ os.environ.setdefault("NEON_DRIVE_DISABLE_NETWORK", "1")
 
 from PySide6.QtWidgets import QApplication
 
-from neon_drive.app import MainWindow, SpeedGraph, TaskInfo, robocopy_arguments
+from neon_drive.app import MainWindow, SpeedGraph, TaskInfo, create_settings, robocopy_arguments
 from neon_drive.copy_engines import RcloneOptions, copy_engine_for_source, rclone_arguments
 
 
@@ -59,7 +59,7 @@ class Beta56Tests(unittest.TestCase):
             args, _ = robocopy_arguments("D:/source.bin", Path("E:/Target"), profile)
             self.assertIn("/Z", args, profile)
 
-    def test_templates_offer_sequential_or_bounded_parallel_rclone(self) -> None:
+    def test_templates_offer_sequential_or_full_parallel_rclone(self) -> None:
         window = self.window()
         window.copy_engine_combo.setCurrentIndex(
             window.copy_engine_combo.findData("rclone")
@@ -70,13 +70,48 @@ class Beta56Tests(unittest.TestCase):
         )
 
         self.assertEqual(window.download_mode_combo.currentData(), "all")
-        self.assertEqual(window.max_concurrent_downloads(), 4)
+        self.assertEqual(window.max_concurrent_downloads(), 10)
 
         window.profile_queue_combo.setCurrentIndex(
             window.profile_queue_combo.findData("sequential")
         )
         self.assertEqual(window.download_mode_combo.currentData(), "sequential")
         self.assertEqual(window.max_concurrent_downloads(), 1)
+
+    def test_beta2_defaults_to_direct_google_and_has_no_bandwidth_limit(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        environment = patch.dict(os.environ, {"NEON_DRIVE_SETTINGS_DIR": temporary.name})
+        environment.start()
+        self.addCleanup(environment.stop)
+        window = self.window()
+
+        self.assertEqual(window.google_route_combo.currentData(), "direct")
+        self.assertEqual(window.drive_chunk_combo.currentData(), 128)
+        args, _target = rclone_arguments(
+            "D:/movie.mkv",
+            "NeonGoogleDrive:Video",
+            window.selected_rclone_options(),
+        )
+        self.assertFalse(any(argument.startswith("--bwlimit") for argument in args))
+
+    def test_beta2_migrates_ask_but_preserves_explicit_filesystem_route(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        environment = patch.dict(os.environ, {"NEON_DRIVE_SETTINGS_DIR": temporary.name})
+        environment.start()
+        self.addCleanup(environment.stop)
+        settings = create_settings("Neon Drive Downloader")
+        settings.setValue("google_drive_route", "ask")
+        settings.sync()
+        window = self.window()
+        self.assertEqual(window.google_route_combo.currentData(), "direct")
+
+        window.google_route_combo.setCurrentIndex(
+            window.google_route_combo.findData("filesystem")
+        )
+        window.persist_settings()
+        self.assertEqual(window.settings.value("google_drive_route"), "filesystem")
 
     def test_blue_start_button_continues_the_same_worker(self) -> None:
         window = self.window()

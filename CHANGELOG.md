@@ -1,5 +1,19 @@
 # Changelog
 
+## 5.6.0-beta.2
+
+- Make direct Neon Rclone upload the default for Google Drive folders selected
+  in Explorer/Finder, so files go straight to the connected cloud account instead
+  of waiting for a second Google Drive for desktop synchronization pass.
+- Migrate the former ambiguous Ask route to direct cloud upload while preserving
+  an explicitly selected ordinary filesystem-copy preference.
+- Remove Neon's hidden four-active-file ceiling for Rclone queues. All/limited
+  modes can now run the requested number of jobs up to the global ten-job setting,
+  with no `--bwlimit` or other application bandwidth cap.
+- Tune Google Drive upload chunks by profile: 64 MiB balanced, 128 MiB fast,
+  256 MiB maximum, and 1 GiB extreme. New installations start with the fast
+  Rclone profile while keeping the safer profiles available.
+
 ## 5.6.0-beta.1
 
 - Smooth Google Drive API pressure with longer timeouts, retry sleeps, and the

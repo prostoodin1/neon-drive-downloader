@@ -184,19 +184,19 @@ COPY_PROFILE_NAMES = {
 RCLONE_PERFORMANCE_PROFILES = {
     "balanced": {
         "chunk": 64, "cutoff": 256, "streams": 4, "transfers": 4,
-        "checkers": 8, "buffer": 16, "write_buffer": 1,
+        "checkers": 8, "buffer": 16, "write_buffer": 1, "drive_chunk": 64,
     },
     "fast": {
         "chunk": 128, "cutoff": 256, "streams": 8, "transfers": 8,
-        "checkers": 16, "buffer": 32, "write_buffer": 2,
+        "checkers": 16, "buffer": 32, "write_buffer": 2, "drive_chunk": 128,
     },
     "maximum": {
         "chunk": 256, "cutoff": 128, "streams": 16, "transfers": 12,
-        "checkers": 32, "buffer": 64, "write_buffer": 4,
+        "checkers": 32, "buffer": 64, "write_buffer": 4, "drive_chunk": 256,
     },
     "extreme": {
         "chunk": 512, "cutoff": 64, "streams": 32, "transfers": 16,
-        "checkers": 64, "buffer": 128, "write_buffer": 8,
+        "checkers": 64, "buffer": 128, "write_buffer": 8, "drive_chunk": 1024,
     },
 }
 PERCENT_RE = re.compile(r"(?<!\d)(?P<pct>\d{1,3}(?:[.,]\d+)?)%")
@@ -2800,9 +2800,9 @@ class MainWindow(QMainWindow):
         )
         behavior_box.addWidget(QLabel("Папка Google Drive в Проводнике / Finder"))
         self.google_route_combo = QComboBox()
-        self.google_route_combo.addItem("Спрашивать: Neon Rclone или клиент Google", "ask")
-        self.google_route_combo.addItem("Путь из Проводника → Neon Rclone", "direct")
+        self.google_route_combo.addItem("Авто: сразу в облако через Neon Rclone", "direct")
         self.google_route_combo.addItem("Обычное копирование через клиент Google", "filesystem")
+        self.google_route_combo.addItem("Спрашивать каждый раз", "ask")
         behavior_box.addWidget(self.google_route_combo)
         behavior_box.addWidget(QLabel("Чанк прямой выгрузки Google Drive"))
         self.drive_chunk_combo = QComboBox()
@@ -3386,7 +3386,13 @@ class MainWindow(QMainWindow):
         self.directory_threads_slider.setValue(directory_threads)
         self.turbo_threads_slider.setValue(turbo_threads)
         if hasattr(self, "drive_chunk_combo"):
-            select(self.drive_chunk_combo, 1024 if preset == "extreme" else 64)
+            drive_chunks = {
+                "slow": 64,
+                "optimal": 128,
+                "maximum": 256,
+                "extreme": 1024,
+            }
+            select(self.drive_chunk_combo, drive_chunks[preset])
         if persist:
             self.settings.setValue("transfer_preset", preset)
             self.settings.sync()
@@ -3990,17 +3996,17 @@ class MainWindow(QMainWindow):
         )
         select(
             self.rclone_performance_combo,
-            self.settings.value("rclone_performance_profile", "balanced"),
+            self.settings.value("rclone_performance_profile", "fast"),
         )
-        select(self.rclone_chunk_combo, self.settings.value("rclone_chunk_mib", 64, type=int))
+        select(self.rclone_chunk_combo, self.settings.value("rclone_chunk_mib", 128, type=int))
         select(self.rclone_cutoff_combo, self.settings.value("rclone_cutoff_mib", 256, type=int))
-        select(self.rclone_streams_combo, self.settings.value("rclone_streams", 4, type=int))
-        select(self.rclone_transfers_combo, self.settings.value("rclone_transfers", 4, type=int))
-        select(self.rclone_checkers_combo, self.settings.value("rclone_checkers", 8, type=int))
-        select(self.rclone_buffer_combo, self.settings.value("rclone_buffer_mib", 16, type=int))
+        select(self.rclone_streams_combo, self.settings.value("rclone_streams", 8, type=int))
+        select(self.rclone_transfers_combo, self.settings.value("rclone_transfers", 8, type=int))
+        select(self.rclone_checkers_combo, self.settings.value("rclone_checkers", 16, type=int))
+        select(self.rclone_buffer_combo, self.settings.value("rclone_buffer_mib", 32, type=int))
         select(
             self.rclone_write_buffer_combo,
-            self.settings.value("rclone_write_buffer_mib", 1, type=int),
+            self.settings.value("rclone_write_buffer_mib", 2, type=int),
         )
         select(self.rclone_retries_combo, self.settings.value("rclone_retries", 3, type=int))
         select(self.rclone_low_retries_combo, self.settings.value("rclone_low_retries", 10, type=int))
@@ -4067,8 +4073,17 @@ class MainWindow(QMainWindow):
         self.auto_rclone_monitor_check.setChecked(False)
         self.download_buffer_check.setChecked(self.settings.value("download_buffer", False, type=bool))
         self.auto_direction_check.setChecked(self.settings.value("auto_direction", True, type=bool))
-        select(self.google_route_combo, self.settings.value("google_drive_route", "ask"))
-        select(self.drive_chunk_combo, self.settings.value("drive_chunk_mib", 64, type=int))
+        saved_google_route = str(self.settings.value("google_drive_route", "direct"))
+        # Beta 2 migrates the old ambiguous "ask" default to direct cloud upload.
+        # An explicitly selected filesystem route remains untouched.
+        if saved_google_route == "ask" and not self.settings.value(
+            "google_drive_direct_beta2_migrated", False, type=bool
+        ):
+            saved_google_route = "direct"
+            self.settings.setValue("google_drive_route", saved_google_route)
+            self.settings.setValue("google_drive_direct_beta2_migrated", True)
+        select(self.google_route_combo, saved_google_route)
+        select(self.drive_chunk_combo, self.settings.value("drive_chunk_mib", 128, type=int))
         self.cleanup_logs_check.setChecked(
             self.settings.value("cleanup_logs", True, type=bool)
         )
@@ -4334,6 +4349,7 @@ class MainWindow(QMainWindow):
             (self.rclone_checkers_combo, profile["checkers"]),
             (self.rclone_buffer_combo, profile["buffer"]),
             (self.rclone_write_buffer_combo, profile["write_buffer"]),
+            (self.drive_chunk_combo, profile["drive_chunk"]),
         )
         self._applying_rclone_profile = True
         try:
@@ -4349,10 +4365,10 @@ class MainWindow(QMainWindow):
             return
         profile = str(self.rclone_performance_combo.currentData() or "manual")
         notes = {
-            "balanced": "Для обычной работы: умеренная нагрузка на память, диск и Google Drive.",
-            "fast": "Быстрый профиль: до 8 потоков на файл и 8 файлов внутри одной папки.",
-            "maximum": "Максимальный профиль: до 16 потоков и усиленные буферы. Рекомендуется для канала 1 Гбит/с.",
-            "extreme": "Высокая нагрузка: до 32 потоков, большой расход RAM и нагрузка на Google Drive. Используйте только на быстром ПК.",
+            "balanced": "Умеренная нагрузка; чанк Google Drive 64 МиБ.",
+            "fast": "До 8 потоков и 8 файлов внутри папки; чанк Google Drive 128 МиБ.",
+            "maximum": "До 16 потоков, усиленные буферы и чанк Google Drive 256 МиБ. Для канала 1 Гбит/с.",
+            "extreme": "До 32 потоков и чанк Google Drive 1 ГиБ. Требует много RAM и быстрого ПК.",
             "manual": "Ручной профиль: значения ниже изменены отдельно и будут сохранены.",
         }
         self.rclone_profile_note.setText(notes.get(profile, notes["manual"]))
@@ -5145,7 +5161,6 @@ class MainWindow(QMainWindow):
         QApplication.instance().quit()
 
     def max_concurrent_downloads(self) -> int:
-        engine = str(self.copy_engine_combo.currentData() or "robocopy")
         mode = self.download_mode_combo.currentData()
         if mode == "sequential":
             return 1
@@ -5153,7 +5168,10 @@ class MainWindow(QMainWindow):
             requested = min(MAX_CONCURRENT_DOWNLOADS, max(1, self.concurrency_spin.value()))
         else:
             requested = min(MAX_CONCURRENT_DOWNLOADS, max(1, self.total_items))
-        return min(4, requested) if engine in ("rclone", "hybrid") else requested
+        # Queue concurrency is a user choice. Rclone already protects API calls
+        # with its own pacer and retries, so Neon must not impose a hidden four-file
+        # ceiling that can leave a fast connection underused.
+        return requested
 
     def effective_directory_threads(self) -> int:
         requested = self.directory_threads_slider.value()
@@ -5340,7 +5358,7 @@ class MainWindow(QMainWindow):
         self, direction: str, folder: str, force_cloud: bool = False
     ) -> bool:
         panel = self.transfer_panels[direction]
-        mode = str(self.google_route_combo.currentData() or "ask")
+        mode = str(self.google_route_combo.currentData() or "direct")
         drive_path = virtual_drive_parts(folder)
         use_cloud = force_cloud or mode == "direct"
         if drive_path and mode == "ask" and not force_cloud:
@@ -5383,7 +5401,7 @@ class MainWindow(QMainWindow):
     def direct_google_destination(self, direction: str, value: str) -> bool:
         if not virtual_drive_parts(value):
             return False
-        if str(self.google_route_combo.currentData() or "ask") == "direct":
+        if str(self.google_route_combo.currentData() or "direct") == "direct":
             return True
         saved = str(self.settings.value(f"google_explorer_destination/{direction}", ""))
         return os.path.normcase(os.path.normpath(saved)) == os.path.normcase(os.path.normpath(value))
@@ -6001,11 +6019,13 @@ class MainWindow(QMainWindow):
             f"Robocopy: {robocopy or 'не используется'}\nRclone: {rclone or 'не используется'}\n"
             f"Операция: {operation.lower()}\n"
             f"Маршрут: {route_description}\n"
-            f"Режим: {mode}\nЛимит процессов: {self.max_concurrent_downloads()}\n"
+            f"Режим: {mode}\nПараллельных задач: {self.max_concurrent_downloads()}\n"
+            "Ограничение скорости Neon: отсутствует\n"
             f"Проверка источника: обязательная · стабильность {SOURCE_STABLE_SECONDS:.0f} сек.\n"
             f"Профиль: {profile_name}\nПотоков /MT на папку: {mt_status}\n"
             f"Турбо-сегментов на большой файл: {turbo_status}\n"
             f"Rclone: чанк {rclone_options.chunk_size_mib} МиБ · "
+            f"чанк Google Drive {rclone_options.drive_chunk_size_mib} МиБ · "
             f"потоков {rclone_options.multi_thread_streams} · "
             f"передач {rclone_options.transfers}\n"
             f"Очередь: {len(items)}\nОбщий объём: {human_size(self.total_bytes)}\n"
