@@ -131,7 +131,7 @@ class Beta9Tests(unittest.TestCase):
     def test_shared_drive_resolution_only_reads_drive_ids_once(self):
         window = self.window()
         path = "H:/Unidades compartidas/Clients Materials/Test carpet"
-        with patch.object(DriveClient, "shared_drive_ids", return_value={"Clients Materials": "drive123"}) as ids, patch.object(
+        with patch.object(window, "resolved_rclone_executable", return_value="rclone"), patch.object(DriveClient, "shared_drive_ids", return_value={"Clients Materials": "drive123"}) as ids, patch.object(
             DriveClient, "folders", side_effect=AssertionError("folder walk is forbidden")
         ):
             self.assertEqual(
@@ -178,7 +178,7 @@ class Beta9Tests(unittest.TestCase):
         window = self.window()
         path = "H:/Unidades compartidas/Clients Materials/Test carpet"
         target = ExplorerDriveTarget("drive-from-explorer", "folder-from-explorer")
-        with patch("neon_drive.app.explorer_shared_drive_target", return_value=target), patch.object(
+        with patch.object(window, "resolved_rclone_executable", return_value="rclone"), patch("neon_drive.app.explorer_shared_drive_target", return_value=target), patch.object(
             DriveClient, "shared_drive_ids", return_value={}
         ):
             with self.assertRaises(SharedDriveAccessError):
@@ -206,7 +206,9 @@ class Beta9Tests(unittest.TestCase):
             source = Path(temporary) / "movie.bin"
             source.write_bytes(b"neon")
             window.upload_sources.setPlainText(str(source))
-            with patch("neon_drive.app.google_drive_connected", return_value=True):
+            with patch("neon_drive.app.google_drive_connected", return_value=True), patch.object(
+                window, "resolved_rclone_executable", return_value="rclone"
+            ):
                 window.accept_destination_folder("upload", path, force_cloud=True)
                 with patch.object(window, "fill_worker_slots"):
                     window.start_transfers("upload")
