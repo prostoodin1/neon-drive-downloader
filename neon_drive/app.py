@@ -21,6 +21,7 @@ from PySide6.QtCore import (
     QEasingCurve,
     QEvent,
     QPoint,
+    QPointF,
     QProcess,
     QProcessEnvironment,
     QPropertyAnimation,
@@ -177,7 +178,7 @@ WINDOW_SIZE_PRESETS = {
 COPY_PROFILE_NAMES = {
     "stable": "Надёжный · докачка после обрыва",
     "optimized": "Ускоренный · многопоточные папки с докачкой",
-    "maximum": "Максимальная скорость · без докачки текущего файла",
+    "maximum": "Максимальная скорость · с докачкой текущего файла",
     "turbo": "Турбо · сегменты большого файла параллельно",
 }
 RCLONE_PERFORMANCE_PROFILES = {
@@ -405,8 +406,9 @@ def robocopy_arguments(
         "/BYTES",
         "/ETA",
     ]
-    if robocopy_profile != "maximum":
-        common.insert(0, "/Z")
+    # Every visible template is resumable. /Z keeps the restart marker even in
+    # the maximum profile; /MT still controls folder parallelism independently.
+    common.insert(0, "/Z")
     target = copy_target_path(path, destination)
     if path.is_dir():
         folder_options = ["/E"]
@@ -508,6 +510,9 @@ class SpeedGraph(QWidget):
         self.values: deque[float] = deque([0.0], maxlen=24)
         self.accent_color = QColor("#00e8f5")
         self.fill_color = QColor("#123b49")
+        self.slow_color = QColor("#ea4335")
+        self.normal_color = QColor("#f9ab00")
+        self.fast_color = QColor("#34a853")
         self.setMinimumHeight(86)
 
     def setValue(self, value: float) -> None:
@@ -519,6 +524,20 @@ class SpeedGraph(QWidget):
         self.fill_color = QColor(accent)
         self.fill_color.setAlpha(35)
         self.update()
+
+    def set_values(self, values) -> None:
+        selected = [max(0.0, float(value)) for value in values]
+        self.values = deque(selected[-600:] or [0.0], maxlen=600)
+        self.update()
+
+    def traffic_color(self, value: float) -> QColor:
+        if value <= 0.05:
+            return QColor("#64748b")
+        if value < 10.0:
+            return self.slow_color
+        if value < 40.0:
+            return self.normal_color
+        return self.fast_color
 
     def paintEvent(self, event) -> None:  # noqa: N802
         if len(self.values) < 2:
@@ -541,8 +560,20 @@ class SpeedGraph(QWidget):
         fill.lineTo(bounds.left(), bounds.bottom())
         fill.closeSubpath()
         painter.fillPath(fill, self.fill_color)
-        painter.setPen(QPen(self.accent_color, 3, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
-        painter.drawPath(line)
+        values = list(self.values)
+        points = [
+            QPointF(
+                bounds.left() + index * step,
+                bounds.bottom() - (value / maximum) * bounds.height(),
+            )
+            for index, value in enumerate(values)
+        ]
+        for index in range(1, len(points)):
+            painter.setPen(QPen(
+                self.traffic_color(values[index]), 3,
+                Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap,
+            ))
+            painter.drawLine(points[index - 1], points[index])
 
 
 class ProfileCard(QFrame):
@@ -845,6 +876,7 @@ class RcloneDownloader(QProcess):
         destination: str | Path,
         options: RcloneOptions,
         expected_bytes: int = 0,
+        source_is_dir: bool | None = None,
     ) -> None:
         self.current = source
         self.expected_bytes = max(0, int(expected_bytes))
@@ -855,7 +887,9 @@ class RcloneDownloader(QProcess):
         self.buffer = ""
         self.last_bytes = 0
         self.last_byte_time = time.monotonic()
-        args, self.expected_target = rclone_arguments(source, destination, options)
+        args, self.expected_target = rclone_arguments(
+            source, destination, options, source_is_dir=source_is_dir
+        )
         command = subprocess.list2cmdline([executable, *args])
         self.log.emit(
             f"\n▶ ИСХОДНИК: {source}\n▶ НАЗНАЧЕНИЕ: {self.expected_target}\n"
@@ -1099,6 +1133,10 @@ class FileRow(QFrame):
         self.progress.setTextVisible(False)
         self.progress.animations_enabled = animations_enabled
         layout.addWidget(self.progress)
+        self.speed_graph = SpeedGraph()
+        self.speed_graph.setMinimumHeight(20)
+        self.speed_graph.setMaximumHeight(28)
+        layout.addWidget(self.speed_graph)
         self.destination_button = QPushButton(f"Куда: {self.target_path()}")
         self.destination_button.setObjectName("folderLink")
         self.destination_button.setToolTip(str(self.target_path()))
@@ -1125,6 +1163,9 @@ class FileRow(QFrame):
             QProcess.startDetached("explorer.exe", ["/select,", str(path)])
 
     def open_source(self) -> None:
+        if is_rclone_remote_path(self.source):
+            QDesktopServices.openUrl(QUrl("https://drive.google.com/drive/my-drive"))
+            return
         self.reveal(Path(self.source))
 
     def open_destination(self) -> None:
@@ -1152,6 +1193,7 @@ class FileRow(QFrame):
         remaining = max(0, size - self.downloaded)
         eta = remaining / speed if speed > 0 else None
         speed_text = f"{speed / (1024 * 1024):.1f} МБ/с" if speed > 0 else "—"
+        self.speed_graph.setValue(speed / (1024 * 1024))
         self.info.setText(
             f"Скачано {human_size(self.downloaded)}  ·  Осталось {human_size(remaining)}  ·  "
             f"{speed_text}  ·  В работе {format_seconds(elapsed)}  ·  ETA {format_seconds(eta)}"
@@ -1187,6 +1229,10 @@ class FilesOverviewRow(QFrame):
         self.progress.setRange(0, 1000)
         self.progress.setTextVisible(False)
         layout.addWidget(self.progress)
+        self.speed_graph = SpeedGraph()
+        self.speed_graph.setMinimumHeight(20)
+        self.speed_graph.setMaximumHeight(28)
+        layout.addWidget(self.speed_graph)
 
         metrics = QHBoxLayout()
         self.bytes_label = QLabel("0.0 Б ИЗ 0.0 Б", objectName="fileInfo")
@@ -1227,6 +1273,7 @@ class FilesOverviewRow(QFrame):
         self.status.setText(state)
         self.bytes_label.setText(f"{human_size(transferred)} ИЗ {human_size(size)}")
         speed_text = f"{speed / (1024 * 1024):.1f} МБ/с" if speed > 0 else "—"
+        self.speed_graph.setValue(speed / (1024 * 1024))
         self.read_speed_label.setText(f"СКАЧИВАНИЕ / ЧТЕНИЕ  {speed_text}")
         self.write_speed_label.setText(f"ЗАПИСЬ  {speed_text}")
 
@@ -1247,6 +1294,8 @@ class TaskInfo:
     source_signature: tuple[int, int, int] | None = None
     source_stable_since: float | None = None
     source_wait_message: str = ""
+    is_directory: bool = False
+    speed_history: deque[float] = field(default_factory=lambda: deque(maxlen=600))
 
     def elapsed(self, now: float | None = None) -> float:
         if self.started_at is None:
@@ -1450,6 +1499,7 @@ class MainWindow(QMainWindow):
         self.measured_done_bytes = 0
         self.speed_bps = 0.0
         self.speed_samples: deque[tuple[float, int]] = deque()
+        self.overall_speed_history: deque[float] = deque(maxlen=600)
         self.metrics_started = False
         self.running = False
         self.stopping = False
@@ -1480,6 +1530,7 @@ class MainWindow(QMainWindow):
         self._refreshing_google_accounts = False
         self.snapshot_threads: dict[str, SourceSnapshotThread] = {}
         self.snapshot_results: dict[str, tuple] = {}
+        self.source_directory_flags: dict[str, bool] = {}
         self.robocopy_executable = "robocopy.exe"
         self.rclone_executable = rclone_executable_name()
         self.beta_build = is_beta_build(__version__)
@@ -1970,7 +2021,7 @@ class MainWindow(QMainWindow):
         start_button.setProperty("colorRole", "upload" if upload else "download")
         start_button.setMinimumHeight(42)
         start_button.clicked.connect(
-            lambda _checked=False, selected=direction: self.start_transfers(selected)
+            lambda _checked=False, selected=direction: self.start_or_resume_transfer(selected)
         )
         transfer_actions = QHBoxLayout()
         transfer_actions.addWidget(start_button, 1)
@@ -2074,6 +2125,12 @@ class MainWindow(QMainWindow):
         speed = QLabel("—", objectName="speed")
         status_layout.addLayout(performance_header)
         status_layout.addWidget(speed)
+        graph_selector = QComboBox()
+        graph_selector.addItem("График · вся передача", "__overall__")
+        graph_selector.setToolTip(
+            "Общий график или история скорости отдельного файла; история остаётся после завершения"
+        )
+        status_layout.addWidget(graph_selector)
         speed_graph = SpeedGraph()
         speed_graph.setMinimumHeight(32)
         speed_graph.setMaximumHeight(70)
@@ -2157,6 +2214,8 @@ class MainWindow(QMainWindow):
         panel.google_drive_button = google_drive_button
         panel.direction_toggle_button = direction_toggle_button
         panel.speed_graph = speed_graph
+        panel.graph_selector = graph_selector
+        graph_selector.currentIndexChanged.connect(self.refresh_selected_speed_graph)
         panel.visible_stop_button = visible_stop
         panel.choose_file_button = choose_file_button
         panel.recent_card = recent_card
@@ -2310,6 +2369,27 @@ class MainWindow(QMainWindow):
             box.addWidget(button)
             cards.addWidget(card, profile_index // 2, profile_index % 2)
         layout.addLayout(cards, 1)
+
+        queue_card = self.card()
+        queue_layout = QHBoxLayout(queue_card)
+        queue_layout.setContentsMargins(18, 13, 18, 13)
+        queue_copy = QVBoxLayout()
+        queue_copy.addWidget(QLabel("Как обрабатывать выбранные файлы", objectName="sectionTitle"))
+        queue_note = QLabel(
+            "Последовательно — стабильнее. Одновременно — до четырёх отдельных задач Rclone "
+            "или до десяти локальных задач, с общей паузой и продолжением."
+        )
+        queue_note.setObjectName("settingDescription")
+        queue_note.setWordWrap(True)
+        queue_copy.addWidget(queue_note)
+        queue_layout.addLayout(queue_copy, 1)
+        self.profile_queue_combo = QComboBox()
+        self.profile_queue_combo.addItem("По очереди · стабильнее", "sequential")
+        self.profile_queue_combo.addItem("Несколько одновременно", "all")
+        self.profile_queue_combo.setMinimumWidth(230)
+        self.profile_queue_combo.currentIndexChanged.connect(self.profile_queue_mode_changed)
+        queue_layout.addWidget(self.profile_queue_combo)
+        layout.addWidget(queue_card)
 
         impact = self.card()
         impact.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
@@ -3297,7 +3377,12 @@ class MainWindow(QMainWindow):
         select(self.copy_profile_combo, copy_profile)
         select(self.rclone_performance_combo, rclone_profile)
         engine = str(self.copy_engine_combo.currentData() or "robocopy")
-        select(self.download_mode_combo, "sequential" if engine in ("rclone", "hybrid") else queue_mode)
+        selected_queue = (
+            str(self.profile_queue_combo.currentData() or queue_mode)
+            if hasattr(self, "profile_queue_combo")
+            else queue_mode
+        )
+        select(self.download_mode_combo, selected_queue)
         self.directory_threads_slider.setValue(directory_threads)
         self.turbo_threads_slider.setValue(turbo_threads)
         if hasattr(self, "drive_chunk_combo"):
@@ -3305,6 +3390,17 @@ class MainWindow(QMainWindow):
         if persist:
             self.settings.setValue("transfer_preset", preset)
             self.settings.sync()
+
+    @Slot()
+    def profile_queue_mode_changed(self) -> None:
+        if not hasattr(self, "download_mode_combo"):
+            return
+        mode = str(self.profile_queue_combo.currentData() or "sequential")
+        index = self.download_mode_combo.findData(mode)
+        if index >= 0 and self.download_mode_combo.currentIndex() != index:
+            self.download_mode_combo.setCurrentIndex(index)
+        self.settings.setValue("template_queue_mode", mode)
+        self.settings.sync()
 
     def handle_agent_request(self, request: dict) -> dict:
         """Handle the hidden local JSON interface used by NeonDriveCLI."""
@@ -3877,8 +3973,13 @@ class MainWindow(QMainWindow):
         select(self.download_mode_combo, self.settings.value(
             "download_mode", "all" if old_parallel else "sequential"
         ))
-        if self.copy_engine_combo.currentData() in ("rclone", "hybrid"):
-            select(self.download_mode_combo, "sequential")
+        select(
+            self.profile_queue_combo,
+            self.settings.value(
+                "template_queue_mode",
+                "all" if self.download_mode_combo.currentData() == "all" else "sequential",
+            ),
+        )
         self.concurrency_spin.setValue(self.settings.value("concurrency", 3, type=int))
         select(self.copy_profile_combo, self.settings.value("copy_profile", "optimized"))
         self.directory_threads_slider.setValue(
@@ -4073,6 +4174,9 @@ class MainWindow(QMainWindow):
         self.settings.setValue("copy_engine", self.copy_engine_combo.currentData())
         self.settings.setValue("rclone_path", self.rclone_path_edit.text().strip())
         self.settings.setValue("download_mode", self.download_mode_combo.currentData())
+        self.settings.setValue(
+            "template_queue_mode", self.profile_queue_combo.currentData()
+        )
         self.settings.setValue("concurrency", self.concurrency_spin.value())
         self.settings.setValue("copy_profile", self.copy_profile_combo.currentData())
         self.settings.setValue("directory_threads", self.directory_threads_slider.value())
@@ -4153,15 +4257,13 @@ class MainWindow(QMainWindow):
                 self.rclone_performance_combo.setCurrentIndex(manual_index)
                 self.rclone_performance_combo.blockSignals(False)
         self.update_rclone_performance_note()
-        if sender is self.copy_engine_combo:
-            engine = str(
-                self.copy_engine_combo.currentData()
-                or ("rclone" if is_macos() else "robocopy")
-            )
-            if engine in ("rclone", "hybrid"):
-                sequential = self.download_mode_combo.findData("sequential")
-                if sequential >= 0:
-                    self.download_mode_combo.setCurrentIndex(sequential)
+        if sender is self.download_mode_combo and hasattr(self, "profile_queue_combo"):
+            mode = str(self.download_mode_combo.currentData() or "sequential")
+            index = self.profile_queue_combo.findData("all" if mode == "all" else "sequential")
+            if index >= 0 and self.profile_queue_combo.currentIndex() != index:
+                self.profile_queue_combo.blockSignals(True)
+                self.profile_queue_combo.setCurrentIndex(index)
+                self.profile_queue_combo.blockSignals(False)
         if sender is self.accent_combo:
             self.accent_color = str(self.accent_combo.currentData())
         if sender is self.contextual_buttons_check and self.contextual_buttons_check.isChecked():
@@ -4286,27 +4388,19 @@ class MainWindow(QMainWindow):
         self.set_files_tab_visible(self.files_tab_check.isChecked())
         self.apply_navigation_layout(animate=False)
         engine = str(self.copy_engine_combo.currentData() or "robocopy")
-        single_rclone_process = engine in ("rclone", "hybrid")
-        self.download_mode_combo.setEnabled(not single_rclone_process and not self.running)
+        self.download_mode_combo.setEnabled(not self.running)
         self.download_mode_combo.setToolTip(
-            "Для Rclone используется только один процесс: файлы идут строго по очереди."
-            if single_rclone_process
-            else ""
+            "Rclone: до четырёх выбранных файлов одновременно; локальные движки — до десяти."
         )
         limited = (
             self.download_mode_combo.currentData() == "limited"
             and not self.running
-            and not single_rclone_process
         )
         self.concurrency_controls.setEnabled(limited)
         self.concurrency_controls.setToolTip(
             ""
             if limited
-            else (
-                "Для Rclone используется только один процесс."
-                if single_rclone_process
-                else "Число файлов задаётся только в ограниченном режиме."
-            )
+            else "Число файлов задаётся только в ограниченном режиме."
         )
         profile = str(self.copy_profile_combo.currentData() or "optimized")
         profile_notes = {
@@ -4319,8 +4413,8 @@ class MainWindow(QMainWindow):
                 "файлов выбранной папки параллельно. Для одного большого файла остаётся /J."
             ),
             "maximum": (
-                "Максимальная скорость: /MT для папок и короткие повторы. /Z отключён, поэтому "
-                "после обрыва текущий незавершённый файл может начаться заново."
+                "Максимальная скорость: /MT для папок, короткие повторы и /Z для продолжения "
+                "незавершённого файла с сохранённого места."
             ),
             "turbo": (
                 "Для одного большого файла приложение читает несколько независимых участков "
@@ -5052,14 +5146,14 @@ class MainWindow(QMainWindow):
 
     def max_concurrent_downloads(self) -> int:
         engine = str(self.copy_engine_combo.currentData() or "robocopy")
-        if engine in ("rclone", "hybrid"):
-            return 1
         mode = self.download_mode_combo.currentData()
         if mode == "sequential":
             return 1
         if mode == "limited":
-            return min(MAX_CONCURRENT_DOWNLOADS, max(1, self.concurrency_spin.value()))
-        return min(MAX_CONCURRENT_DOWNLOADS, max(1, self.total_items))
+            requested = min(MAX_CONCURRENT_DOWNLOADS, max(1, self.concurrency_spin.value()))
+        else:
+            requested = min(MAX_CONCURRENT_DOWNLOADS, max(1, self.total_items))
+        return min(4, requested) if engine in ("rclone", "hybrid") else requested
 
     def effective_directory_threads(self) -> int:
         requested = self.directory_threads_slider.value()
@@ -5117,8 +5211,21 @@ class MainWindow(QMainWindow):
         self.update_start_button()
 
     def update_start_button(self) -> None:
-        self.transfer_panels["download"].start_button.setText("Начать передачу")
-        self.transfer_panels["upload"].start_button.setText("Начать передачу")
+        for direction, panel in self.transfer_panels.items():
+            resumable = self.running and self.paused and direction == self.active_transfer
+            panel.start_button.setText("Продолжить" if resumable else "Начать передачу")
+            panel.start_button.setProperty(
+                "colorRole", "download" if resumable else ("upload" if direction == "upload" else "download")
+            )
+            panel.start_button.setEnabled(resumable or not self.running)
+            panel.start_button.style().unpolish(panel.start_button)
+            panel.start_button.style().polish(panel.start_button)
+
+    def start_or_resume_transfer(self, direction: str) -> None:
+        if self.running and self.paused and direction == self.active_transfer:
+            self.toggle_pause()
+            return
+        self.start_transfers(direction)
 
     def start_current_transfer(self) -> None:
         self.start_transfers(self.active_transfer)
@@ -5605,6 +5712,9 @@ class MainWindow(QMainWindow):
         self.rclone_monitor.activateWindow()
 
     def start_transfers(self, direction: str) -> None:
+        if self.running and self.paused and direction == self.active_transfer:
+            self.toggle_pause()
+            return
         if self.running or self.workers or self.cloud_browser is not None or self.google_drive_oauth_thread is not None:
             return
         if direction == "upload" and not self.upload_addon_enabled:
@@ -5642,6 +5752,38 @@ class MainWindow(QMainWindow):
                 panel.sources.setPlainText(previous_sources)
                 panel.destination.setText(explorer_destination_text)
                 self.show_transfer_direction(direction)
+        self.source_directory_flags.clear()
+        virtual_google_sources = [item for item in items if virtual_drive_parts(item)]
+        if direction == "download" and virtual_google_sources:
+            if not self.google_drive_is_connected():
+                self._start_after_google_oauth = direction
+                self.start_google_drive_oauth()
+                return
+            converted_items: list[str] = []
+            try:
+                for item in items:
+                    if virtual_drive_parts(item):
+                        remote_item = self.resolve_explorer_google_destination(item)
+                        self.source_directory_flags[remote_item] = Path(item).is_dir()
+                        converted_items.append(remote_item)
+                    else:
+                        self.source_directory_flags[item] = Path(item).is_dir()
+                        converted_items.append(item)
+            except (SharedDriveAccessError, RuntimeError, ValueError) as exc:
+                QMessageBox.critical(
+                    self,
+                    APP_NAME,
+                    "Не удалось подготовить источник Google Drive для скачивания:\n"
+                    f"{exc}\n\nВыбранные пути сохранены; проверьте активный Google-аккаунт.",
+                )
+                return
+            items = converted_items
+            route_description = (
+                "Авто: Google Drive → локальный диск · прямое скачивание через Neon Rclone"
+            )
+            rclone_index = self.copy_engine_combo.findData("rclone")
+            if rclone_index >= 0:
+                self.copy_engine_combo.setCurrentIndex(rclone_index)
         if direct_google:
             if not self.google_drive_is_connected():
                 self._cloud_picker_request = (direction, explorer_destination_text)
@@ -5713,7 +5855,10 @@ class MainWindow(QMainWindow):
             if requirement:
                 QMessageBox.critical(self, APP_NAME, requirement)
                 return
-        missing = [item for item in items if not Path(item).exists()]
+        missing = [
+            item for item in items
+            if not is_rclone_remote_path(item) and not Path(item).exists()
+        ]
         if missing:
             QMessageBox.warning(self, APP_NAME, "Не найдены выбранные пути:\n" + "\n".join(missing[:5]))
             return
@@ -5789,7 +5934,11 @@ class MainWindow(QMainWindow):
                 size = Path(source).stat().st_size if Path(source).is_file() else 0
             except OSError:
                 size = 0
-            self.tasks[source] = TaskInfo(source=source, size=size)
+            self.tasks[source] = TaskInfo(
+                source=source,
+                size=size,
+                is_directory=self.source_directory_flags.get(source, Path(source).is_dir()),
+            )
             self.total_bytes += size
         self.total_items = len(items)
         self.completed_items = 0
@@ -5797,6 +5946,8 @@ class MainWindow(QMainWindow):
         self.measured_done_bytes = 0
         self.speed_bps = 0.0
         self.speed_samples.clear()
+        self.overall_speed_history.clear()
+        self.overall_speed_history.append(0.0)
         self.metrics_started = False
         self.started_at = time.monotonic()
         self.stop_after_file = False
@@ -5866,6 +6017,9 @@ class MainWindow(QMainWindow):
     def rebuild_task_rows(self, destination: str | Path) -> None:
         panel = self.current_transfer_panel()
         self.clear_file_rows(self.active_transfer)
+        panel.graph_selector.blockSignals(True)
+        panel.graph_selector.clear()
+        panel.graph_selector.addItem("График · вся передача", "__overall__")
         mode = str(self.file_display_combo.currentData() or "list")
         for index, (source, task) in enumerate(self.tasks.items()):
             row = FileRow(
@@ -5880,13 +6034,21 @@ class MainWindow(QMainWindow):
             row.update_data(task.size, 0, 0, 0, "ОЖИДАНИЕ")
             task.row = row
             panel.file_rows[source] = row
+            panel.graph_selector.addItem(
+                f"Файл · {Path(source).name or source}", source
+            )
             self.place_file_row(row, index, mode, self.active_transfer)
+        panel.graph_selector.blockSignals(False)
+        panel.speed_graph.set_values(self.overall_speed_history)
         self.file_rows = panel.file_rows
 
     def start_next(self) -> None:
         self.fill_worker_slots()
 
     def source_ready_for_transfer(self, task: TaskInfo, snapshot: tuple | None = None) -> bool:
+        if is_rclone_remote_path(task.source):
+            task.source_wait_message = ""
+            return True
         now = time.monotonic()
         signature, problem = snapshot if snapshot is not None else source_snapshot(Path(task.source))
         if problem or signature is None:
@@ -5943,7 +6105,7 @@ class MainWindow(QMainWindow):
             source = self.queue.popleft()
             task = self.tasks.get(source)
             snapshot = self.snapshot_results.pop(source, None)
-            if task is not None and snapshot is None:
+            if task is not None and snapshot is None and not is_rclone_remote_path(source):
                 if source not in self.snapshot_threads and len(self.snapshot_threads) < 2:
                     self.set_source_waiting(task, "Проверка размера, доступности и готовности исходника…")
                     thread = SourceSnapshotThread(source, self)
@@ -6001,7 +6163,7 @@ class MainWindow(QMainWindow):
         if isinstance(worker, RcloneDownloader):
             destination_text = self.active_destination or self.current_transfer_panel().destination.text()
             if self.active_transfer == "download" and self.download_buffer_check.isChecked():
-                if Path(source).is_file() and not is_rclone_remote_path(destination_text):
+                if not task.is_directory and not is_rclone_remote_path(destination_text):
                     try:
                         worker.disk_buffer = TransferBuffer(Path(destination_text), task.size)
                         destination_text = str(worker.disk_buffer.root)
@@ -6013,15 +6175,28 @@ class MainWindow(QMainWindow):
                 else:
                     self.append_log("Папка передаётся напрямую; файловый буфер не используется.\n")
             self.append_log("Запуск Rclone: подключение, проверка исходника и контрольной суммы…\n")
-            worker.start_item(
-                self.rclone_executable,
-                source,
+            rclone_destination = (
                 destination_text
                 if is_rclone_remote_path(destination_text)
-                else Path(destination_text),
-                self.selected_rclone_options(),
-                task.size,
+                else Path(destination_text)
             )
+            if is_rclone_remote_path(source):
+                worker.start_item(
+                    self.rclone_executable,
+                    source,
+                    rclone_destination,
+                    self.selected_rclone_options(),
+                    task.size,
+                    source_is_dir=task.is_directory,
+                )
+            else:
+                worker.start_item(
+                    self.rclone_executable,
+                    source,
+                    rclone_destination,
+                    self.selected_rclone_options(),
+                    task.size,
+                )
         elif turbo_file:
             worker.start_item(
                 source,
@@ -6041,6 +6216,9 @@ class MainWindow(QMainWindow):
         task = self.tasks.get(source)
         if task is None:
             return
+        if task.size <= 0 and percent > 0 and item_bytes > 0:
+            task.size = max(int(item_bytes), int(item_bytes * 100.0 / percent))
+            self.total_bytes = sum(item.size for item in self.tasks.values())
         measured = min(int(item_bytes), task.size) if task.size else int(item_bytes)
         task.downloaded = max(task.downloaded, measured)
         if isinstance(self.workers.get(source), RcloneDownloader):
@@ -6076,6 +6254,16 @@ class MainWindow(QMainWindow):
         )
 
     @Slot()
+    def refresh_selected_speed_graph(self) -> None:
+        panel = self.current_transfer_panel()
+        selected = str(panel.graph_selector.currentData() or "__overall__")
+        if selected == "__overall__":
+            panel.speed_graph.set_values(self.overall_speed_history)
+            return
+        task = self.tasks.get(selected)
+        panel.speed_graph.set_values(task.speed_history if task else [0.0])
+
+    @Slot()
     def update_metrics(self) -> None:
         now = time.monotonic()
         if self.paused:
@@ -6092,6 +6280,7 @@ class MainWindow(QMainWindow):
                 elapsed = task.samples[-1][0] - task.samples[0][0]
                 delta = task.samples[-1][1] - task.samples[0][1]
                 task.speed = max(0.0, delta / elapsed) if elapsed >= 1 else 0.0
+            task.speed_history.append(task.speed / (1024 * 1024))
             if task.row:
                 task.row.update_data(task.size, task.downloaded, task.speed, task.elapsed(now), task.status)
             self.sync_files_overview_row(self.active_transfer, task.source)
@@ -6108,9 +6297,9 @@ class MainWindow(QMainWindow):
         elapsed = now - first_time
         delta = self.measured_done_bytes - first_bytes
         self.speed_bps = max(0.0, delta / elapsed) if elapsed >= 1 else 0.0
+        self.overall_speed_history.append(self.speed_bps / (1024 * 1024))
         panel = self.current_transfer_panel()
-        if hasattr(panel, "speed_graph"):
-            panel.speed_graph.setValue(self.speed_bps / (1024 * 1024))
+        self.refresh_selected_speed_graph()
         if self.rclone_monitor is not None and "rclone" in self.active_engines:
             self.rclone_monitor.set_speed(self.speed_bps / (1024 * 1024))
         if self.speed_bps > 0:
@@ -6241,6 +6430,7 @@ class MainWindow(QMainWindow):
                 panel.pause_button.setText("ПАУЗА")
                 panel.visible_stop_button.setText("Остановить")
                 panel.visible_stop_button.setProperty("colorRole", "danger")
+                self.update_start_button()
                 operation = "ВЫГРУЗКА" if self.active_transfer == "upload" else "ЗАГРУЗКА"
                 self.set_state(f"●  {operation}")
                 for source, task in self.tasks.items():
@@ -6257,6 +6447,7 @@ class MainWindow(QMainWindow):
                 panel.pause_button.setText("ПРОДОЛЖИТЬ")
                 panel.visible_stop_button.setText("Продолжить")
                 panel.visible_stop_button.setProperty("colorRole", "upload")
+                self.update_start_button()
                 self.set_state("●  ПАУЗА")
                 for source, task in self.tasks.items():
                     if source in self.workers and task.finished_at is None:

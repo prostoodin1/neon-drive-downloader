@@ -290,13 +290,13 @@ class StopAfterCurrentFileTests(unittest.TestCase):
             self.assertFalse(any(argument.startswith("/MT:") for argument in stable))
 
             maximum, _ = robocopy_arguments(str(source), destination, "maximum", 12)
-            self.assertNotIn("/Z", maximum)
+            self.assertIn("/Z", maximum)
             self.assertIn("/MT:12", maximum)
             self.assertIn("/R:8", maximum)
             self.assertIn("/W:2", maximum)
 
             turbo_folder, _ = robocopy_arguments(str(source), destination, "turbo", 16)
-            self.assertNotIn("/Z", turbo_folder)
+            self.assertIn("/Z", turbo_folder)
             self.assertIn("/MT:16", turbo_folder)
 
     def test_interface_has_no_preview_and_dialog_style_is_global(self) -> None:
@@ -356,7 +356,7 @@ class StopAfterCurrentFileTests(unittest.TestCase):
             window.force_exit = True
             window.close()
 
-    def test_rclone_and_hybrid_modes_use_only_one_process(self) -> None:
+    def test_rclone_and_hybrid_modes_allow_bounded_parallel_files(self) -> None:
         window = MainWindow()
         window.notifications_check.setChecked(False)
         all_index = window.download_mode_combo.findData("all")
@@ -366,8 +366,8 @@ class StopAfterCurrentFileTests(unittest.TestCase):
         for engine in ("rclone", "hybrid"):
             engine_index = window.copy_engine_combo.findData(engine)
             window.copy_engine_combo.setCurrentIndex(engine_index)
-            self.assertEqual(window.max_concurrent_downloads(), 1)
-            self.assertEqual(window.download_mode_combo.currentData(), "sequential")
+            self.assertEqual(window.max_concurrent_downloads(), 3)
+            self.assertEqual(window.download_mode_combo.currentData(), "all")
 
         window.force_exit = True
         window.close()

@@ -1,6 +1,22 @@
-# Neon Drive 5.5.0 Beta 10
+# Neon Drive 5.6.0 Beta 1
 
 ## Исправления и новые возможности
+
+- Прямые загрузки и выгрузки Google Drive используют более длинный таймаут,
+  повтор с паузой и API-pacer Rclone. Это уменьшает провалы из-за квотных всплесков,
+  не устанавливая искусственный предел скорости.
+- Загрузка официального Rclone автоматически повторяется до четырёх раз при
+  временном сетевом таймауте — и в приложении, и при сборке установщиков. Если
+  основной сервер недоступен, используется официальный релиз Rclone на GitHub
+  с обязательной проверкой `SHA256SUMS`.
+- Файлы Google Drive, выбранные как источник в Проводнике/Finder, автоматически
+  распознаются как загрузка на локальный диск и передаются напрямую через Neon Rclone.
+- Для всех шаблонов можно выбрать последовательную очередь или одновременную работу.
+  Rclone безопасно ограничен четырьмя активными выбранными файлами.
+- Основная синяя кнопка показывает «Продолжить» при сохранённой паузе и возобновляет
+  те же процессы. Robocopy `/Z` теперь включён и в максимальном шаблоне.
+- Общий график и графики отдельных файлов используют динамические зоны скорости:
+  красную, жёлтую и зелёную. Историю можно смотреть после завершения очереди.
 
 - Можно подключить несколько Google-аккаунтов одновременно. В настройках появился
   список подключений, выбор активного аккаунта, отдельные кнопки добавления,
@@ -54,9 +70,9 @@
 
 | Система | Приложение со встроенным Rclone | Менеджер версий |
 | :--- | :--- | :--- |
-| 🪟 **Windows 10 / 11 · x64** | [⬇ Скачать Setup.exe](https://github.com/prostoodin1/neon-drive-downloader/releases/download/v5.5.0-beta.10/NeonDrive-Setup.exe) | [⬇ Скачать Installer.exe](https://github.com/prostoodin1/neon-drive-downloader/releases/download/v5.5.0-beta.10/NeonDriveInstaller.exe) |
-| 🍎 **Mac · Apple Silicon** | [⬇ Скачать приложение ARM64.dmg](https://github.com/prostoodin1/neon-drive-downloader/releases/download/v5.5.0-beta.10/NeonDrive-macOS-arm64.dmg) | [⬇ Скачать установщик ARM64.dmg](https://github.com/prostoodin1/neon-drive-downloader/releases/download/v5.5.0-beta.10/NeonDriveInstaller-macOS-arm64.dmg) |
-| 💻 **Mac · Intel** | [⬇ Скачать приложение x64.dmg](https://github.com/prostoodin1/neon-drive-downloader/releases/download/v5.5.0-beta.10/NeonDrive-macOS-x64.dmg) | [⬇ Скачать установщик x64.dmg](https://github.com/prostoodin1/neon-drive-downloader/releases/download/v5.5.0-beta.10/NeonDriveInstaller-macOS-x64.dmg) |
+| 🪟 **Windows 10 / 11 · x64** | [⬇ Скачать Setup.exe](https://github.com/prostoodin1/neon-drive-downloader/releases/download/v5.6.0-beta.1/NeonDrive-Setup.exe) | [⬇ Скачать Installer.exe](https://github.com/prostoodin1/neon-drive-downloader/releases/download/v5.6.0-beta.1/NeonDriveInstaller.exe) |
+| 🍎 **Mac · Apple Silicon** | [⬇ Скачать приложение ARM64.dmg](https://github.com/prostoodin1/neon-drive-downloader/releases/download/v5.6.0-beta.1/NeonDrive-macOS-arm64.dmg) | [⬇ Скачать установщик ARM64.dmg](https://github.com/prostoodin1/neon-drive-downloader/releases/download/v5.6.0-beta.1/NeonDriveInstaller-macOS-arm64.dmg) |
+| 💻 **Mac · Intel** | [⬇ Скачать приложение x64.dmg](https://github.com/prostoodin1/neon-drive-downloader/releases/download/v5.6.0-beta.1/NeonDrive-macOS-x64.dmg) | [⬇ Скачать установщик x64.dmg](https://github.com/prostoodin1/neon-drive-downloader/releases/download/v5.6.0-beta.1/NeonDriveInstaller-macOS-x64.dmg) |
 
 [Все версии и изменения](https://github.com/prostoodin1/neon-drive-downloader/releases).
 
@@ -73,7 +89,7 @@ macOS **12+**, отдельные ARM64 и Intel DMG приложения и м�
 используйте [инструкцию Apple](https://support.apple.com/en-euro/102445),
 если доверяете приложению. Защита системы автоматически не отключается.
 
-Проверки: 144 регрессионных теста, реальное чтение «Моего диска» через OAuth без изменения
+Проверки: 152 регрессионных теста, реальное чтение «Моего диска» через OAuth без изменения
 облачных файлов, локальные передачи встроенным Rclone, контроль хешей, отмена и
 проверки собранных пакетов. Конкретный общий диск Clients Materials недоступен
 подключённому тестовому аккаунту; выгрузка 25 ГБ на него не проверялась.

@@ -2,20 +2,20 @@
 
 ### Ваши файлы. Понятная передача. Windows + macOS.
 
-![Version](https://img.shields.io/badge/version-5.5.0--beta.10-4285F4)
+![Version](https://img.shields.io/badge/version-5.6.0--beta.1-4285F4)
 ![Windows](https://img.shields.io/badge/Windows-10%20%2F%2011-34A853)
 ![macOS](https://img.shields.io/badge/macOS-12%2B-FBBC04)
 ![Channel](https://img.shields.io/badge/channel-beta-EA4335)
 
-## Скачать Beta 10
+## Скачать 5.6.0 Beta 1
 
 | Система | Приложение со встроенным Rclone | Менеджер версий |
 | :--- | :--- | :--- |
-| 🪟 **Windows 10 / 11 · x64** | [⬇ Скачать Setup.exe](https://github.com/prostoodin1/neon-drive-downloader/releases/download/v5.5.0-beta.10/NeonDrive-Setup.exe) | [⬇ Скачать Installer.exe](https://github.com/prostoodin1/neon-drive-downloader/releases/download/v5.5.0-beta.10/NeonDriveInstaller.exe) |
-| 🍎 **Mac · Apple Silicon** | [⬇ Скачать приложение ARM64.dmg](https://github.com/prostoodin1/neon-drive-downloader/releases/download/v5.5.0-beta.10/NeonDrive-macOS-arm64.dmg) | [⬇ Скачать установщик ARM64.dmg](https://github.com/prostoodin1/neon-drive-downloader/releases/download/v5.5.0-beta.10/NeonDriveInstaller-macOS-arm64.dmg) |
-| 💻 **Mac · Intel** | [⬇ Скачать приложение x64.dmg](https://github.com/prostoodin1/neon-drive-downloader/releases/download/v5.5.0-beta.10/NeonDrive-macOS-x64.dmg) | [⬇ Скачать установщик x64.dmg](https://github.com/prostoodin1/neon-drive-downloader/releases/download/v5.5.0-beta.10/NeonDriveInstaller-macOS-x64.dmg) |
+| 🪟 **Windows 10 / 11 · x64** | [⬇ Скачать Setup.exe](https://github.com/prostoodin1/neon-drive-downloader/releases/download/v5.6.0-beta.1/NeonDrive-Setup.exe) | [⬇ Скачать Installer.exe](https://github.com/prostoodin1/neon-drive-downloader/releases/download/v5.6.0-beta.1/NeonDriveInstaller.exe) |
+| 🍎 **Mac · Apple Silicon** | [⬇ Скачать приложение ARM64.dmg](https://github.com/prostoodin1/neon-drive-downloader/releases/download/v5.6.0-beta.1/NeonDrive-macOS-arm64.dmg) | [⬇ Скачать установщик ARM64.dmg](https://github.com/prostoodin1/neon-drive-downloader/releases/download/v5.6.0-beta.1/NeonDriveInstaller-macOS-arm64.dmg) |
+| 💻 **Mac · Intel** | [⬇ Скачать приложение x64.dmg](https://github.com/prostoodin1/neon-drive-downloader/releases/download/v5.6.0-beta.1/NeonDrive-macOS-x64.dmg) | [⬇ Скачать установщик x64.dmg](https://github.com/prostoodin1/neon-drive-downloader/releases/download/v5.6.0-beta.1/NeonDriveInstaller-macOS-x64.dmg) |
 
-**Для Windows:** [установить Neon Drive](https://github.com/prostoodin1/neon-drive-downloader/releases/download/v5.5.0-beta.10/NeonDrive-Setup.exe) · [менеджер новых и старых версий](https://github.com/prostoodin1/neon-drive-downloader/releases/download/v5.5.0-beta.10/NeonDriveInstaller.exe).
+**Для Windows:** [установить Neon Drive](https://github.com/prostoodin1/neon-drive-downloader/releases/download/v5.6.0-beta.1/NeonDrive-Setup.exe) · [менеджер новых и старых версий](https://github.com/prostoodin1/neon-drive-downloader/releases/download/v5.6.0-beta.1/NeonDriveInstaller.exe).
 
 [Все версии и изменения →](https://github.com/prostoodin1/neon-drive-downloader/releases)
 · [Сообщить об ошибке →](https://github.com/prostoodin1/neon-drive-downloader/issues)
@@ -29,7 +29,18 @@ Neon Drive — независимое приложение, не продукт 
 
 ![Neon Drive Beta 8 — настоящие виджеты приложения](docs/images/beta8-dark.png)
 
-## Новое в Beta 10
+## Новое в 5.6.0 Beta 1
+
+- **Стабильнее Google Drive:** увеличены сетевые таймауты и повторы, добавлена
+  плавная работа API-pacer без ограничения пропускной способности.
+- **Автоскачивание из Google Drive:** выбранные в Проводнике файлы Google Drive
+  автоматически преобразуются в прямые источники Neon Rclone, а назначение остаётся локальным.
+- **Несколько файлов:** в «Шаблонах» можно выбрать очередь или одновременную передачу;
+  Rclone запускает до четырёх задач, локальные движки — до десяти.
+- **Продолжение с синей кнопки:** во время сохранённой паузы основная кнопка становится
+  синей «Продолжить» и возобновляет те же процессы. Robocopy `/Z` включён во всех шаблонах.
+- **Живые графики:** красный означает низкую скорость, жёлтый — среднюю, зелёный —
+  высокую. Доступны общий график и история каждого файла, в том числе после завершения.
 
 - **Несколько Google-аккаунтов:** добавляйте личные, Workspace и командные
   подключения, выбирайте активное и удаляйте или переподключайте каждое отдельно.

@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import io
+import json
 import os
 import tempfile
 import unittest
+import urllib.error
 import zipfile
 from pathlib import Path
 from unittest.mock import patch
@@ -33,6 +35,55 @@ def macos_rclone_archive(payload: bytes = b"\xcf\xfa\xed\xfe-neon-rclone") -> by
 
 
 class RcloneManagerTests(unittest.TestCase):
+    def test_official_github_release_is_used_when_download_server_is_unavailable(self) -> None:
+        filename = "rclone-v1.2.3-osx-arm64.zip"
+        checksum = "a" * 64
+        sums_url = "https://example.invalid/SHA256SUMS"
+        archive_url = "https://example.invalid/rclone.zip"
+        release = json.dumps({
+            "tag_name": "v1.2.3",
+            "assets": [
+                {"name": "SHA256SUMS", "browser_download_url": sums_url},
+                {"name": filename, "browser_download_url": archive_url},
+            ],
+        }).encode()
+        responses = {
+            rclone_manager.GITHUB_RELEASE_API: release,
+            sums_url: f"{checksum}  {filename}\n".encode(),
+        }
+
+        def open_url(request, timeout=0, context=None):
+            return FakeResponse(responses[request.full_url])
+
+        with (
+            patch.object(rclone_manager, "rclone_package_platform", return_value=("osx", "arm64")),
+            patch.object(rclone_manager.urllib.request, "urlopen", side_effect=open_url),
+        ):
+            details = rclone_manager._github_release_details()
+
+        self.assertEqual(details, ("v1.2.3", filename, checksum, archive_url))
+
+    def test_download_retries_temporary_network_timeouts(self) -> None:
+        attempts = [
+            urllib.error.URLError(TimeoutError("temporary")),
+            urllib.error.URLError(TimeoutError("temporary")),
+            FakeResponse(b"rclone v1.2.3\n"),
+        ]
+        progress = []
+        with (
+            patch.object(rclone_manager.urllib.request, "urlopen", side_effect=attempts),
+            patch.object(rclone_manager.time, "sleep") as sleep,
+        ):
+            payload = rclone_manager._fetch_bytes(
+                rclone_manager.VERSION_URL,
+                rclone_manager.MAX_TEXT_BYTES,
+                lambda percent, message: progress.append((percent, message)),
+            )
+
+        self.assertEqual(payload, b"rclone v1.2.3\n")
+        self.assertEqual(sleep.call_count, 2)
+        self.assertTrue(any("повтор 3 из 4" in message for _, message in progress))
+
     def test_macos_archive_is_verified_and_installed_as_executable(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             archive = macos_rclone_archive()

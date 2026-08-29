@@ -1,5 +1,22 @@
 # Changelog
 
+## 5.6.0-beta.1
+
+- Smooth Google Drive API pressure with longer timeouts, retry sleeps, and the
+  native Rclone Drive pacer without imposing a bandwidth cap.
+- Retry official Rclone package downloads up to four times on temporary network
+  timeouts, both in the application and release builders.
+- Fall back to the official Rclone GitHub release and its SHA256SUMS when the
+  primary downloads server is temporarily unreachable.
+- Auto-convert Explorer/Finder Google Drive source paths into managed direct
+  downloads to a local destination.
+- Allow sequential or bounded parallel file queues for every template, with up
+  to four selected Rclone files active at once.
+- Turn the primary action into a blue Continue button while live workers are
+  paused, and keep Robocopy restartable `/Z` mode in every performance template.
+- Add red/yellow/green speed zones, per-file mini graphs, and a selectable total
+  or per-file history that remains available when the queue finishes.
+
 ## 5.5.0-beta.10
 
 - Add independent OAuth/Rclone profiles for multiple Google accounts with an

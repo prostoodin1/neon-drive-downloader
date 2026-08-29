@@ -41,8 +41,13 @@ def is_rclone_remote_path(value: str | Path) -> bool:
 
 
 def rclone_target_path(source: str | Path, destination: str | Path) -> str | Path:
-    source_path = Path(source)
-    name = source_path.name or source_path.drive.rstrip(":\\/") or "drive"
+    source_text = str(source).strip().rstrip("/\\")
+    source_path = Path(source_text)
+    if is_rclone_remote_path(source_text):
+        remote_tail = source_text.split(":", 1)[1].rstrip("/\\")
+        name = remote_tail.replace("\\", "/").rsplit("/", 1)[-1] or "drive"
+    else:
+        name = source_path.name or source_path.drive.rstrip(":\\/") or "drive"
     if is_rclone_remote_path(destination):
         base = str(destination).strip().rstrip("/\\")
         separator = "" if base.endswith(":") else "/"
@@ -52,6 +57,8 @@ def rclone_target_path(source: str | Path, destination: str | Path) -> str | Pat
 
 def copy_engine_for_source(mode: str, source: str | Path) -> str:
     """Resolve the actual engine without ever writing to one item from two tools."""
+    if is_rclone_remote_path(source):
+        return "rclone"
     if mode == "rclone":
         return "rclone"
     if mode == "hybrid":
@@ -63,15 +70,18 @@ def rclone_arguments(
     source: str,
     destination: str | Path,
     options: RcloneOptions | None = None,
+    source_is_dir: bool | None = None,
 ) -> tuple[list[str], str | Path]:
     """Build an rclone command for an Explorer path or configured remote path."""
     selected = options or RcloneOptions()
     source_path = Path(source)
-    target = rclone_target_path(source_path, destination)
-    command = "copy" if source_path.is_dir() else "copyto"
+    remote_source = is_rclone_remote_path(source)
+    is_directory = source_path.is_dir() if source_is_dir is None else bool(source_is_dir)
+    target = rclone_target_path(source, destination)
+    command = "copy" if is_directory else "copyto"
     args = [
         command,
-        str(source_path),
+        source if remote_source else str(source_path),
         str(target),
         "--stats=1s",
         "--stats-log-level=NOTICE",
@@ -79,7 +89,7 @@ def rclone_arguments(
         "--log-level=INFO",
         "--color=NEVER",
         "--contimeout=30s",
-        "--timeout=5m",
+        "--timeout=10m",
         "--max-buffer-memory=512Mi",
         f"--multi-thread-chunk-size={max(1, int(selected.chunk_size_mib))}Mi",
         f"--multi-thread-cutoff={max(1, int(selected.multi_thread_cutoff_mib))}Mi",
@@ -90,9 +100,10 @@ def rclone_arguments(
         f"--multi-thread-write-buffer-size={max(1, int(selected.multi_thread_write_buffer_size_mib))}Mi",
         f"--retries={max(1, min(20, int(selected.retries)))}",
         f"--low-level-retries={max(1, min(50, int(selected.low_level_retries)))}",
+        "--retries-sleep=3s",
         "--partial-suffix=.neon-partial",
     ]
-    if source_path.is_dir():
+    if is_directory:
         args.append("--create-empty-src-dirs")
     if selected.checksum:
         args.append("--checksum")
@@ -112,6 +123,10 @@ def rclone_arguments(
         if drive_chunk > 64:
             args = [arg for arg in args if not arg.startswith("--transfers=")]
             args.append(f"--transfers={min(max(1, int(selected.transfers)), max(1, 1024 // drive_chunk))}")
+    if remote_source or is_rclone_remote_path(destination):
+        # Let the Drive pacer smooth API bursts instead of repeatedly hitting
+        # quota backoff. This does not cap transfer bandwidth.
+        args.extend(("--drive-pacer-min-sleep=10ms", "--drive-pacer-burst=200"))
     if selected.config_path:
         args.append(f"--config={selected.config_path}")
     return args, target
