@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import os
 import json
 import re
@@ -272,6 +273,63 @@ def destination_collisions(
             targets[key] = (target, [])
         targets[key][1].append(source)
     return {target: items for target, items in targets.values() if len(items) > 1}
+
+
+def existing_local_targets(
+    sources: list[str], destination: Path
+) -> tuple[list[tuple[str, Path]], list[tuple[str, Path]], list[tuple[str, Path]]]:
+    """Classify existing targets as identical files, changed files, or folder merges."""
+    identical: list[tuple[str, Path]] = []
+    changed: list[tuple[str, Path]] = []
+    folders: list[tuple[str, Path]] = []
+    for source_text in sources:
+        if is_rclone_remote_path(source_text):
+            continue
+        source = Path(source_text)
+        target = Path(copy_target_path(source, destination))
+        if not target.exists():
+            continue
+        if source.is_dir() and target.is_dir():
+            folders.append((source_text, target))
+            continue
+        if not source.is_file() or not target.is_file():
+            changed.append((source_text, target))
+            continue
+        try:
+            source_stat = source.stat()
+            target_stat = target.stat()
+            same_size = source_stat.st_size == target_stat.st_size
+            # Robocopy and Rclone preserve modification time. FAT/network filesystems
+            # may round it, hence the two-second tolerance.
+            same_time = abs(source_stat.st_mtime_ns - target_stat.st_mtime_ns) <= 2_000_000_000
+            same_content = same_size and _matching_file_fingerprint(
+                source, target, int(source_stat.st_size)
+            )
+        except OSError:
+            changed.append((source_text, target))
+            continue
+        (identical if same_size and same_time and same_content else changed).append(
+            (source_text, target)
+        )
+    return identical, changed, folders
+
+
+def _matching_file_fingerprint(source: Path, target: Path, size: int) -> bool:
+    """Compare all small files and representative blocks of very large files."""
+    digest_source = hashlib.sha256()
+    digest_target = hashlib.sha256()
+    block_size = 1024 * 1024
+    if size <= 64 * 1024 * 1024:
+        offsets = range(0, max(size, 1), block_size)
+    else:
+        offsets = (0, max(0, size // 2 - block_size // 2), max(0, size - block_size))
+    with source.open("rb") as source_stream, target.open("rb") as target_stream:
+        for offset in offsets:
+            source_stream.seek(offset)
+            target_stream.seek(offset)
+            digest_source.update(source_stream.read(block_size))
+            digest_target.update(target_stream.read(block_size))
+    return digest_source.digest() == digest_target.digest()
 
 
 def upload_destination_requirement(destination: Path) -> str | None:
@@ -1930,10 +1988,12 @@ class MainWindow(QMainWindow):
         choose_files_button.clicked.connect(
             lambda _checked=False, selected=direction: self.choose_files_for(selected)
         )
-        choose_folder_button = QPushButton("Папка")
+        choose_folder_button = QPushButton("Добавить папку")
         choose_folder_button.setProperty("colorRole", "folder")
-        choose_folder_button.setMaximumWidth(110)
-        choose_folder_button.setToolTip("Выбрать папку или подключённый диск через Проводник")
+        choose_folder_button.setMaximumWidth(145)
+        choose_folder_button.setToolTip(
+            "Добавить целую папку или корень подключённого диска в очередь"
+        )
         choose_folder_button.clicked.connect(
             lambda _checked=False, selected=direction: self.choose_source_folder_for(selected)
         )
@@ -2033,6 +2093,14 @@ class MainWindow(QMainWindow):
         visible_stop.setEnabled(False)
         visible_stop.clicked.connect(self.toggle_resumable_stop)
         transfer_actions.addWidget(visible_stop)
+        hard_stop = QPushButton("Полностью остановить")
+        hard_stop.setProperty("colorRole", "danger")
+        hard_stop.setToolTip(
+            "Немедленно отменить очередь и закрыть все процессы Rclone/Robocopy этой передачи"
+        )
+        hard_stop.setEnabled(False)
+        hard_stop.clicked.connect(self.stop_now)
+        transfer_actions.addWidget(hard_stop)
         path_grid.addLayout(transfer_actions, 2, 2)
         path_grid.setColumnStretch(0, 5)
         path_grid.setColumnStretch(2, 5)
@@ -2217,6 +2285,7 @@ class MainWindow(QMainWindow):
         panel.graph_selector = graph_selector
         graph_selector.currentIndexChanged.connect(self.refresh_selected_speed_graph)
         panel.visible_stop_button = visible_stop
+        panel.hard_stop_button = hard_stop
         panel.choose_file_button = choose_file_button
         panel.recent_card = recent_card
         panel.transfer_stats_label = transfer_stats_label
@@ -2312,7 +2381,7 @@ class MainWindow(QMainWindow):
                 "Весь доступный канал",
                 "32 Rclone-потока · до 10 задач Robocopy",
                 "Для больших файлов, быстрого SSD и свободного канала. Повышенный расход RAM; скорость всё равно ограничена сетью, диском и сервисом.",
-                (("Скорость", "без лимита"), ("Размер чанка", "512 МиБ"), ("Параллельность", "32 потока"), ("Проверка", "До и после")),
+                (("Скорость", "без лимита"), ("Чанк Google Drive", "256 МиБ"), ("Параллельность", "32 потока"), ("Проверка", "До и после")),
             ),
             (
                 "extreme", "Экстрим", "Крупные облачные файлы",
@@ -2376,8 +2445,8 @@ class MainWindow(QMainWindow):
         queue_copy = QVBoxLayout()
         queue_copy.addWidget(QLabel("Как обрабатывать выбранные файлы", objectName="sectionTitle"))
         queue_note = QLabel(
-            "Последовательно — стабильнее. Одновременно — до четырёх отдельных задач Rclone "
-            "или до десяти локальных задач, с общей паузой и продолжением."
+            "Последовательно — стабильнее. Одновременно — до десяти отдельных задач "
+            "Rclone или локальных задач, с общей паузой, продолжением и полной остановкой."
         )
         queue_note.setObjectName("settingDescription")
         queue_note.setWordWrap(True)
@@ -2427,9 +2496,16 @@ class MainWindow(QMainWindow):
         title_row = QHBoxLayout()
         title = QLabel("ВСЕ ФАЙЛЫ И ИХ СОСТОЯНИЕ", objectName="sectionTitle")
         self.files_summary_label = QLabel("ФАЙЛОВ: 0", objectName="fileStatus")
+        self.clear_transfers_button = QPushButton("Очистить")
+        self.clear_transfers_button.setProperty("colorRole", "danger")
+        self.clear_transfers_button.setToolTip(
+            "Очистить накопившиеся списки загрузки и выгрузки; общий счётчик данных не сбрасывается"
+        )
+        self.clear_transfers_button.clicked.connect(self.clear_transfers_view)
         title_row.addWidget(title)
         title_row.addStretch()
         title_row.addWidget(self.files_summary_label)
+        title_row.addWidget(self.clear_transfers_button)
         intro_layout.addLayout(title_row)
         note = QLabel(
             "Общая очередь загрузки и выгрузки: источник сверху, назначение снизу, "
@@ -2590,6 +2666,10 @@ class MainWindow(QMainWindow):
         google_account_row.addWidget(self.google_account_combo, 1)
         google_account_row.addWidget(self.google_account_kind_combo)
         google_box.addLayout(google_account_row)
+        self.google_account_identity = QLabel("Почта: не определена")
+        self.google_account_identity.setObjectName("settingDescription")
+        self.google_account_identity.setWordWrap(True)
+        google_box.addWidget(self.google_account_identity)
         google_actions = QHBoxLayout()
         self.google_drive_add_button = QPushButton("Добавить аккаунт")
         self.google_drive_add_button.setObjectName("primarySmall")
@@ -4406,7 +4486,7 @@ class MainWindow(QMainWindow):
         engine = str(self.copy_engine_combo.currentData() or "robocopy")
         self.download_mode_combo.setEnabled(not self.running)
         self.download_mode_combo.setToolTip(
-            "Rclone: до четырёх выбранных файлов одновременно; локальные движки — до десяти."
+            "Rclone и локальные движки: до десяти выбранных файлов одновременно."
         )
         limited = (
             self.download_mode_combo.currentData() == "limited"
@@ -4739,8 +4819,17 @@ class MainWindow(QMainWindow):
         self.google_account_combo.clear()
         kind_names = {"personal": "Личный", "workspace": "Workspace", "team": "Команда"}
         for account in accounts:
-            detail = account.email if account.email and account.email != account.label else kind_names.get(account.kind, "Google")
-            self.google_account_combo.addItem(f"{account.label} · {detail}", account.remote_name)
+            email = account.email or "почта не определена"
+            account_type = kind_names.get(account.kind, "Google")
+            label = account.label if account.label and account.label != account.email else "Google Drive"
+            self.google_account_combo.addItem(
+                f"{email} · {label} · {account_type}", account.remote_name
+            )
+            self.google_account_combo.setItemData(
+                self.google_account_combo.count() - 1,
+                f"Почта: {email}\nНазвание: {label}\nТип: {account_type}",
+                Qt.ItemDataRole.ToolTipRole,
+            )
         index = self.google_account_combo.findData(selected)
         if index >= 0:
             self.google_account_combo.setCurrentIndex(index)
@@ -4750,8 +4839,16 @@ class MainWindow(QMainWindow):
         connected = bool(selected and google_drive_connected(remote_name=selected))
         active = next((account for account in accounts if account.remote_name == selected), None)
         self.google_drive_status.setText(
-            f"● {active.label}" if connected and active else "Не подключён"
+            f"● {active.email or active.label}" if connected and active else "Не подключён"
         )
+        if active:
+            account_type = kind_names.get(active.kind, "Google")
+            self.google_account_identity.setText(
+                f"Почта: {active.email or 'не определена'}  ·  "
+                f"Название: {active.label}  ·  Тип: {account_type}"
+            )
+        else:
+            self.google_account_identity.setText("Почта: не определена")
         self.google_drive_status.setProperty("ready", connected)
         self.google_drive_status.style().unpolish(self.google_drive_status)
         self.google_drive_status.style().polish(self.google_drive_status)
@@ -5655,6 +5752,34 @@ class MainWindow(QMainWindow):
             self.files_overview_layout.addWidget(empty)
         self.files_overview_layout.addStretch()
 
+    def clear_transfers_view(self) -> None:
+        """Clear accumulated transfer selections without resetting lifetime statistics."""
+        if self.running or self.workers:
+            QMessageBox.warning(
+                self,
+                APP_NAME,
+                "Сначала полностью остановите или завершите текущую передачу.",
+            )
+            return
+        for direction, panel in self.transfer_panels.items():
+            panel.sources.clear()
+            panel.terminal.clear()
+            self.clear_file_rows(direction)
+            panel.graph_selector.blockSignals(True)
+            panel.graph_selector.clear()
+            panel.graph_selector.addItem("График · вся передача", "__overall__")
+            panel.graph_selector.blockSignals(False)
+            panel.speed_graph.set_values([0.0])
+        self.settings.remove("sources")
+        self.settings.remove("upload_sources")
+        self.settings.sync()
+        self.tasks.clear()
+        self.queue.clear()
+        self.overall_speed_history.clear()
+        self.overall_speed_history.append(0.0)
+        self.refresh_files_overview()
+        self.update_start_button()
+
     def sync_files_overview_row(self, direction: str, source: str) -> None:
         if not self.files_tab_visible:
             return
@@ -5704,12 +5829,20 @@ class MainWindow(QMainWindow):
             *(panel.preset_combo for panel in self.transfer_panels.values()),
         ):
             widget.setEnabled(enabled)
+        if hasattr(self, "clear_transfers_button"):
+            self.clear_transfers_button.setEnabled(enabled)
         self.update_settings_visibility()
 
     def set_transfer_controls_enabled(self, enabled: bool) -> None:
         for direction, panel in self.transfer_panels.items():
             active = enabled and direction == self.active_transfer
-            for button in (panel.pause_button, panel.after_button, panel.stop_button, panel.visible_stop_button):
+            for button in (
+                panel.pause_button,
+                panel.after_button,
+                panel.stop_button,
+                panel.visible_stop_button,
+                panel.hard_stop_button,
+            ):
                 button.setEnabled(active)
 
     def set_download_controls_enabled(self, enabled: bool) -> None:
@@ -5893,6 +6026,7 @@ class MainWindow(QMainWindow):
                 + "\n\n".join(details),
             )
             return
+        preflight_summary = "Проверка назначения: Rclone сверит размер и время каждого облачного файла перед передачей."
         if not remote_destination:
             try:
                 Path(destination).mkdir(parents=True, exist_ok=True)
@@ -5905,6 +6039,47 @@ class MainWindow(QMainWindow):
                 QMessageBox.critical(self, APP_NAME, write_problem)
                 return
             storage_summary = f"Свободно: {human_size(usage.free)} из {human_size(usage.total)}"
+            identical, changed, folder_merges = existing_local_targets(items, Path(destination))
+            if changed:
+                examples = "\n".join(
+                    f"• {Path(source).name} → {target}"
+                    for source, target in changed[:5]
+                )
+                answer = QMessageBox.question(
+                    self,
+                    "Файлы уже есть в назначении",
+                    "Neon обнаружил существующие файлы с другим размером или временем.\n\n"
+                    f"{examples}\n\nЗаменить/обновить их из выбранного источника?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                    QMessageBox.StandardButton.Yes,
+                )
+                if answer != QMessageBox.StandardButton.Yes:
+                    return
+            if identical:
+                skipped = {os.path.normcase(os.path.normpath(source)) for source, _ in identical}
+                items = [
+                    source for source in items
+                    if os.path.normcase(os.path.normpath(source)) not in skipped
+                ]
+                visible_sources = [
+                    source for source in raw_items
+                    if os.path.normcase(os.path.normpath(source)) not in skipped
+                ]
+                panel.sources.setPlainText("\n".join(visible_sources))
+                self.refresh_file_rows(direction)
+            preflight_summary = (
+                f"Проверка назначения: совпадающих файлов пропущено {len(identical)} · "
+                f"изменённых для обновления {len(changed)} · существующих папок для слияния {len(folder_merges)}."
+            )
+            if not items:
+                self.set_state("●  УЖЕ СКОПИРОВАНО")
+                QMessageBox.information(
+                    self,
+                    APP_NAME,
+                    "Все выбранные файлы уже находятся в папке назначения и совпадают "
+                    "по размеру и времени изменения. Повторное копирование не требуется.",
+                )
+                return
         engine_mode = str(self.copy_engine_combo.currentData() or "robocopy")
         if direction == "download" and self.download_buffer_check.isChecked():
             engine_mode = "rclone"
@@ -6019,6 +6194,7 @@ class MainWindow(QMainWindow):
             f"Robocopy: {robocopy or 'не используется'}\nRclone: {rclone or 'не используется'}\n"
             f"Операция: {operation.lower()}\n"
             f"Маршрут: {route_description}\n"
+            f"{preflight_summary}\n"
             f"Режим: {mode}\nПараллельных задач: {self.max_concurrent_downloads()}\n"
             "Ограничение скорости Neon: отсутствует\n"
             f"Проверка источника: обязательная · стабильность {SOURCE_STABLE_SECONDS:.0f} сек.\n"

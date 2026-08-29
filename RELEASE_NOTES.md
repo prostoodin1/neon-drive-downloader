@@ -1,7 +1,20 @@
-# Neon Drive 5.6.0 Beta 2
+# Neon Drive 5.6.0 Beta 3
 
 ## Исправления и новые возможности
 
+- Рядом с обычной паузой появилась отдельная кнопка «Полностью остановить».
+  Она немедленно очищает очередь и закрывает все процессы Rclone, Robocopy и Turbo,
+  принадлежащие текущей передаче.
+- Перед локальной передачей Neon проверяет назначение. Совпадающие файлы
+  пропускаются, отличающиеся существующие файлы требуют подтверждения, а уже
+  существующие папки объединяются с проверкой каждого элемента движком.
+- На обеих страницах кнопка «Добавить папку» позволяет передать целый каталог или
+  подключённый диск. Поддерживаются физические, внешние и сетевые диски в любых
+  локальных сочетаниях, включая перенос папки с одного диска на другой.
+- Во вкладке «Передачи» добавлена кнопка «Очистить». Она удаляет накопившиеся
+  списки обеих сторон, строки, терминалы и графики, не меняя постоянный счётчик трафика.
+- Список Google OAuth2-подключений теперь показывает точную почту, название и тип
+  каждого профиля. Почта выбранного активного аккаунта отображается отдельно.
 - Папка Google Drive, выбранная в Проводнике/Finder, теперь по умолчанию
   выгружается прямо в облако через Neon Rclone. Файл не проходит через локальную
   копию виртуального диска и не ждёт отдельной синхронизации клиента Google.
@@ -36,8 +49,8 @@
 - Во всех шаблонах кнопка «Остановить» при активной передаче теперь приостанавливает
   существующий процесс, а «Продолжить» возобновляет тот же PID и ту же Rclone
   resumable-сессию. Robocopy сохраняет `/Z`, Turbo — карту завершённых сегментов.
-  Жёсткая отмена остаётся в Advanced mode; полностью закрытый процесс Google Drive
-  возобновить нельзя, поэтому для докачки Neon должен оставаться запущенным.
+  Полная отмена теперь также доступна отдельной кнопкой рядом со стартом; полностью
+  закрытый процесс Google Drive возобновить нельзя, поэтому для докачки используйте паузу.
 - Конечная папка Google Drive теперь сначала выбирается в обычном Проводнике/Finder.
   Путь остаётся видимым, а Neon преобразует его для Rclone только при запуске.
   Отдельное облачное окно и обход всех папок больше не используются.
@@ -81,9 +94,9 @@
 
 | Система | Приложение со встроенным Rclone | Менеджер версий |
 | :--- | :--- | :--- |
-| 🪟 **Windows 10 / 11 · x64** | [⬇ Скачать Setup.exe](https://github.com/prostoodin1/neon-drive-downloader/releases/download/v5.6.0-beta.2/NeonDrive-Setup.exe) | [⬇ Скачать Installer.exe](https://github.com/prostoodin1/neon-drive-downloader/releases/download/v5.6.0-beta.2/NeonDriveInstaller.exe) |
-| 🍎 **Mac · Apple Silicon** | [⬇ Скачать приложение ARM64.dmg](https://github.com/prostoodin1/neon-drive-downloader/releases/download/v5.6.0-beta.2/NeonDrive-macOS-arm64.dmg) | [⬇ Скачать установщик ARM64.dmg](https://github.com/prostoodin1/neon-drive-downloader/releases/download/v5.6.0-beta.2/NeonDriveInstaller-macOS-arm64.dmg) |
-| 💻 **Mac · Intel** | [⬇ Скачать приложение x64.dmg](https://github.com/prostoodin1/neon-drive-downloader/releases/download/v5.6.0-beta.2/NeonDrive-macOS-x64.dmg) | [⬇ Скачать установщик x64.dmg](https://github.com/prostoodin1/neon-drive-downloader/releases/download/v5.6.0-beta.2/NeonDriveInstaller-macOS-x64.dmg) |
+| 🪟 **Windows 10 / 11 · x64** | [⬇ Скачать Setup.exe](https://github.com/prostoodin1/neon-drive-downloader/releases/download/v5.6.0-beta.3/NeonDrive-Setup.exe) | [⬇ Скачать Installer.exe](https://github.com/prostoodin1/neon-drive-downloader/releases/download/v5.6.0-beta.3/NeonDriveInstaller.exe) |
+| 🍎 **Mac · Apple Silicon** | [⬇ Скачать приложение ARM64.dmg](https://github.com/prostoodin1/neon-drive-downloader/releases/download/v5.6.0-beta.3/NeonDrive-macOS-arm64.dmg) | [⬇ Скачать установщик ARM64.dmg](https://github.com/prostoodin1/neon-drive-downloader/releases/download/v5.6.0-beta.3/NeonDriveInstaller-macOS-arm64.dmg) |
+| 💻 **Mac · Intel** | [⬇ Скачать приложение x64.dmg](https://github.com/prostoodin1/neon-drive-downloader/releases/download/v5.6.0-beta.3/NeonDrive-macOS-x64.dmg) | [⬇ Скачать установщик x64.dmg](https://github.com/prostoodin1/neon-drive-downloader/releases/download/v5.6.0-beta.3/NeonDriveInstaller-macOS-x64.dmg) |
 
 [Все версии и изменения](https://github.com/prostoodin1/neon-drive-downloader/releases).
 

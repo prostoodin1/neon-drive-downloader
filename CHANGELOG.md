@@ -1,5 +1,19 @@
 # Changelog
 
+## 5.6.0-beta.3
+
+- Add a permanently visible Full stop action that cancels the pending queue and
+  closes every Rclone, Robocopy, or Turbo worker owned by the active transfer.
+- Check local destination targets before starting: identical files are skipped,
+  changed files require confirmation, and existing folders are safely merged by
+  the selected engine. Direct cloud copies retain Rclone's per-item destination check.
+- Make whole-folder and drive selection explicit on both transfer pages and verify
+  ordinary local/network disk-to-disk folder transfers through the same queue.
+- Add Clear to the Transfers page to remove accumulated download/upload selections,
+  rows, terminals, and graphs without resetting lifetime traffic statistics.
+- Show the exact Google email, profile label, and account type for every connected
+  OAuth profile and for the currently active account.
+
 ## 5.6.0-beta.2
 
 - Make direct Neon Rclone upload the default for Google Drive folders selected
