@@ -185,25 +185,28 @@ class Beta8Tests(unittest.TestCase):
                     self.assertFalse(list(destination.glob(".neon-buffer-*")))
                     self.assertEqual(hashlib.sha256(source.read_bytes()).digest(), digest)
 
-    def test_cancel_cloud_picker_keeps_original_explorer_path(self):
+    def test_google_button_uses_explorer_and_keeps_selected_path(self):
         window = self.window()
-        original = "H:/Unidades compartidas/Clients Materials/Test carpet"
-        window.upload_destination.setText(original)
-        with patch("neon_drive.app.google_drive_connected", return_value=True), patch.object(window, "resolved_rclone_executable", return_value="rclone"), patch("neon_drive.app.DriveFolderDialog") as dialog:
-            dialog.return_value.exec.return_value = QDialog.DialogCode.Rejected
+        selected = "H:/Unidades compartidas/Clients Materials/Test carpet"
+        with patch("neon_drive.app.QFileDialog.getExistingDirectory", return_value=selected), patch(
+            "neon_drive.app.google_drive_connected", return_value=True
+        ), patch("neon_drive.app.DriveFolderDialog") as dialog:
             window.use_or_connect_google_drive()
-        self.assertEqual(window.upload_destination.text(), original)
+        self.assertEqual(window.upload_destination.text(), selected)
+        self.assertEqual(window.settings.value("google_explorer_destination/upload"), selected)
+        dialog.assert_not_called()
         self.assertIsNone(window.cloud_browser)
 
-    def test_cloud_picker_commits_only_confirmed_folder(self):
+    def test_cloud_compatibility_entry_keeps_explorer_path_for_start(self):
         window = self.window()
-        selected = DriveFolder("Test carpet", "folder123", "drive456", "Clients Materials / Test carpet")
-        with patch("neon_drive.app.google_drive_connected", return_value=True), patch.object(window, "resolved_rclone_executable", return_value="rclone"), patch("neon_drive.app.DriveFolderDialog") as dialog:
-            dialog.return_value.exec.return_value = QDialog.DialogCode.Accepted
-            dialog.return_value.selected_folder = selected
-            self.assertTrue(window.choose_cloud_destination("upload", "H:/Unidades compartidas/Clients Materials/Test carpet"))
-        self.assertEqual(window.upload_destination.text(), selected.remote)
-        self.assertEqual(window.settings.value("cloud_label/" + selected.remote), selected.label)
+        selected = "H:/Unidades compartidas/Clients Materials/Test carpet"
+        with patch("neon_drive.app.google_drive_connected", return_value=True), patch(
+            "neon_drive.app.DriveFolderDialog"
+        ) as dialog:
+            self.assertTrue(window.choose_cloud_destination("upload", selected))
+        self.assertEqual(window.upload_destination.text(), selected)
+        self.assertTrue(window.direct_google_destination("upload", selected))
+        dialog.assert_not_called()
 
     def test_oauth_success_does_not_erase_destination(self):
         window = self.window()
@@ -222,9 +225,11 @@ class Beta8Tests(unittest.TestCase):
             browser.assert_not_called()
         self.assertEqual(window.upload_destination.text(), path)
         window.google_route_combo.setCurrentIndex(window.google_route_combo.findData("direct"))
-        with patch.object(window, "choose_cloud_destination", return_value=False) as browser:
-            self.assertFalse(window.accept_destination_folder("upload", path))
-            browser.assert_called_once_with("upload", path)
+        with patch.object(window, "choose_cloud_destination") as browser, patch(
+            "neon_drive.app.google_drive_connected", return_value=True
+        ):
+            self.assertTrue(window.accept_destination_folder("upload", path))
+            browser.assert_not_called()
         self.assertEqual(window.upload_destination.text(), path)
 
     def test_single_file_replaces_list_and_stop_is_outside_terminal(self):

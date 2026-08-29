@@ -34,7 +34,10 @@ def is_rclone_remote_path(value: str | Path) -> bool:
     text = str(value).strip()
     if re.match(r"^[A-Za-z]:[\\/]", text):
         return False
-    return bool(re.match(r"^[A-Za-z0-9_.-]+(?:,[A-Za-z_]+=[A-Za-z0-9_-]*)*:", text))
+    return bool(re.match(
+        r"^[A-Za-z0-9_.-]+(?:,(?:[A-Za-z_]+=[A-Za-z0-9_-]*|[A-Za-z_]+))*:",
+        text,
+    ))
 
 
 def rclone_target_path(source: str | Path, destination: str | Path) -> str | Path:

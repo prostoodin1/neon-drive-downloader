@@ -56,6 +56,30 @@ def managed_options(value: str) -> dict[str, str]:
     return options
 
 
+def remote_from_explorer_path(
+    value: str, shared_drive_ids: dict[str, str] | None = None
+) -> str:
+    """Convert a Drive for desktop path without walking its cloud folders."""
+    parsed = virtual_drive_parts(value)
+    if not parsed:
+        raise ValueError("Путь не похож на папку Google Drive из Проводника.")
+    kind, drive_name, names = parsed
+    if kind == "my":
+        root = "NeonGoogleDrive:"
+    elif kind == "shared_with_me":
+        root = "NeonGoogleDrive,shared_with_me:"
+    else:
+        identifiers = {name.casefold(): identifier for name, identifier in (shared_drive_ids or {}).items()}
+        drive_id = identifiers.get(drive_name.casefold())
+        if not drive_id or not ID_PATTERN.fullmatch(drive_id):
+            raise ValueError(
+                f"Не удалось сопоставить общий диск «{drive_name}». "
+                "Проверьте подключённый Google-аккаунт и повторите попытку."
+            )
+        root = f"NeonGoogleDrive,team_drive={drive_id}:"
+    return root + "/".join(names)
+
+
 @dataclass(frozen=True)
 class DriveFolder:
     name: str
@@ -113,7 +137,13 @@ class DriveClient:
             if self.cancelled.is_set():
                 raise RuntimeError("Выбор папки отменён.")
             if process.returncode:
-                raise RuntimeError(stderr.decode("utf-8", errors="replace")[-2000:] or "Не удалось прочитать Google Drive.")
+                message = stderr.decode("utf-8", errors="replace")
+                if "rateLimitExceeded" in message or "Quota exceeded" in message:
+                    raise RuntimeError(
+                        "Google временно ограничил запросы Rclone. Путь из Проводника сохранён; "
+                        "подождите немного и повторите запуск."
+                    )
+                raise RuntimeError(message[-2000:] or "Не удалось прочитать Google Drive.")
             result = json.loads(stdout.decode("utf-8"))
             if not isinstance(result, list):
                 raise ValueError("Google Drive вернул неожиданный список папок.")
@@ -132,6 +162,14 @@ class DriveClient:
             if name and ID_PATTERN.fullmatch(identifier):
                 roots.append(DriveFolder(name, identifier, identifier, "Общие диски / " + name))
         return roots
+
+    def shared_drive_ids(self) -> dict[str, str]:
+        result: dict[str, str] = {}
+        for drive in self.query(["backend", "drives", GOOGLE_DRIVE_ROOT]):
+            name, identifier = str(drive.get("name", "")), str(drive.get("id", ""))
+            if name and ID_PATTERN.fullmatch(identifier):
+                result[name] = identifier
+        return result
 
     def folders(self, parent: DriveFolder) -> list[DriveFolder]:
         result = []

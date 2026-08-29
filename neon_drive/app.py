@@ -85,7 +85,13 @@ from . import __version__
 from .settings_store import create_settings
 from .transfer_buffer import TransferBuffer
 from .transfer_direction import detect_direction, location_label
-from .drive_browser import DriveFolderDialog, is_managed_drive_path, virtual_drive_parts
+from .drive_browser import (
+    DriveClient,
+    DriveFolderDialog,
+    is_managed_drive_path,
+    remote_from_explorer_path,
+    virtual_drive_parts,
+)
 from .addons import (
     install_upload_addon,
     is_beta_build,
@@ -1443,8 +1449,10 @@ class MainWindow(QMainWindow):
         self.system_health_silent = False
         self.rclone_monitor: RcloneMonitorWindow | None = None
         self.active_engines: set[str] = set()
+        self.active_destination: str | Path | None = None
         self.cloud_browser: DriveFolderDialog | None = None
         self._cloud_picker_request: tuple[str, str] | None = None
+        self._start_after_google_oauth: str | None = None
         self.snapshot_threads: dict[str, SourceSnapshotThread] = {}
         self.snapshot_results: dict[str, tuple] = {}
         self.robocopy_executable = "robocopy.exe"
@@ -1890,7 +1898,9 @@ class MainWindow(QMainWindow):
         )
         google_drive_button = QPushButton("Google Drive")
         google_drive_button.setObjectName("primarySmall")
-        google_drive_button.setToolTip("Выбрать облачную папку Google Drive через OAuth2")
+        google_drive_button.setToolTip(
+            "Сначала выбрать конечную папку в Проводнике, затем использовать Neon Rclone"
+        )
         google_drive_button.setVisible(upload)
         google_drive_button.clicked.connect(self.use_or_connect_google_drive)
         destination_row.addWidget(destination, 1)
@@ -2660,8 +2670,8 @@ class MainWindow(QMainWindow):
         )
         behavior_box.addWidget(QLabel("Папка Google Drive в Проводнике / Finder"))
         self.google_route_combo = QComboBox()
-        self.google_route_combo.addItem("Спрашивать: напрямую или обычное копирование", "ask")
-        self.google_route_combo.addItem("Предлагать облачную папку через Neon", "direct")
+        self.google_route_combo.addItem("Спрашивать: Neon Rclone или клиент Google", "ask")
+        self.google_route_combo.addItem("Путь из Проводника → Neon Rclone", "direct")
         self.google_route_combo.addItem("Обычное копирование через клиент Google", "filesystem")
         behavior_box.addWidget(self.google_route_combo)
         behavior_box.addWidget(QLabel("Чанк прямой выгрузки Google Drive"))
@@ -4543,38 +4553,31 @@ class MainWindow(QMainWindow):
             upload_button.setText("Google Drive ✓" if connected else "Google Drive")
 
     def use_or_connect_google_drive(self) -> None:
-        self.choose_cloud_destination("upload", self.upload_destination.text())
+        if self.running:
+            return
+        current = self.upload_destination.text().strip()
+        if is_rclone_remote_path(current):
+            current = str(self.settings.value("google_explorer_destination/upload", ""))
+        folder = QFileDialog.getExistingDirectory(
+            self,
+            "Сначала выберите конечную папку Google Drive",
+            current,
+        )
+        if folder:
+            self.accept_destination_folder("upload", folder, force_cloud=True)
 
     def choose_cloud_destination(self, direction: str, original: str) -> bool:
-        if self.running or self.cloud_browser is not None:
+        """Compatibility entry point: selection now always happens in Explorer."""
+        if self.running:
             return False
-        if not google_drive_connected():
-            self._cloud_picker_request = (direction, original)
-            self.start_google_drive_oauth()
-            return False
-        executable = self.resolved_rclone_executable()
-        if not executable:
-            QMessageBox.warning(self, APP_NAME, "Встроенный Rclone не найден. Переустановите его в настройках.")
-            return False
-        dialog = DriveFolderDialog(executable, original, self)
-        self.cloud_browser = dialog
-        try:
-            if dialog.exec() != QDialog.DialogCode.Accepted or dialog.selected_folder is None:
-                return False
-            selected = dialog.selected_folder
-            remote = selected.remote
-            self.settings.setValue("cloud_label/" + remote, selected.label)
-            panel = self.transfer_panels[direction]
-            panel.destination.setText(remote)
-            panel.destination.setToolTip(selected.label)
-            self.copy_engine_combo.setCurrentIndex(self.copy_engine_combo.findData("rclone"))
-            self.settings.setValue("upload_destination" if direction == "upload" else "destination", remote)
-            self.persist_settings()
-            self.refresh_file_rows(direction)
-            return True
-        finally:
-            self.cloud_browser = None
-            dialog.deleteLater()
+        if virtual_drive_parts(original):
+            return self.accept_destination_folder(direction, original, force_cloud=True)
+        panel = self.transfer_panels[direction]
+        start = str(self.settings.value(f"google_explorer_destination/{direction}", ""))
+        folder = QFileDialog.getExistingDirectory(
+            self, "Сначала выберите конечную папку Google Drive", start
+        )
+        return bool(folder and self.accept_destination_folder(direction, folder, force_cloud=True))
 
     def start_google_drive_oauth(self) -> None:
         if self.google_drive_oauth_thread is not None:
@@ -4611,12 +4614,14 @@ class MainWindow(QMainWindow):
         QMessageBox.information(
             self,
             APP_NAME,
-            "Google Drive подключён. Для прямой выгрузки выберите облачную папку кнопкой Google Drive. Текущий путь сохранён.",
+            "Google Drive подключён к Neon Rclone. Выбранный в Проводнике путь сохранён; "
+            "облачный поиск папок не запускается.",
         )
 
     @Slot(str)
     def google_drive_oauth_failed(self, message: str) -> None:
         self._cloud_picker_request = None
+        self._start_after_google_oauth = None
         self.append_log(f"Google Drive OAuth2: авторизация не завершена — {message}\n")
         QMessageBox.critical(self, APP_NAME, f"Не удалось подключить Google Drive:\n{message}")
 
@@ -4626,8 +4631,14 @@ class MainWindow(QMainWindow):
         self.refresh_google_drive_status()
         request = self._cloud_picker_request
         self._cloud_picker_request = None
+        start_direction = self._start_after_google_oauth
+        self._start_after_google_oauth = None
         if request and google_drive_connected():
-            QTimer.singleShot(0, lambda: self.choose_cloud_destination(*request))
+            direction, path = request
+            self.transfer_panels[direction].destination.setText(path)
+            self.append_log("Google Drive: конечный путь из Проводника сохранён без облачного поиска.\n")
+        if start_direction and google_drive_connected():
+            QTimer.singleShot(0, lambda: self.start_transfers(start_direction))
 
     def disconnect_google_drive_account(self) -> None:
         if self.running:
@@ -5069,26 +5080,30 @@ class MainWindow(QMainWindow):
 
     def choose_destination_for(self, direction: str) -> bool:
         panel = self.transfer_panels[direction]
-        if is_managed_drive_path(panel.destination.text()):
-            mode = str(self.google_route_combo.currentData())
-            if mode != "filesystem":
-                return self.choose_cloud_destination(direction, panel.destination.text())
         title = "Выберите папку на Google Drive" if direction == "upload" else "Выберите папку"
-        start = "" if is_rclone_remote_path(panel.destination.text()) else panel.destination.text()
+        start = panel.destination.text()
+        if is_rclone_remote_path(start):
+            start = str(self.settings.value(f"google_explorer_destination/{direction}", ""))
         folder = QFileDialog.getExistingDirectory(self, title, start)
         if folder:
             return self.accept_destination_folder(direction, folder)
         return False
 
-    def accept_destination_folder(self, direction: str, folder: str) -> bool:
+    def accept_destination_folder(
+        self, direction: str, folder: str, force_cloud: bool = False
+    ) -> bool:
         panel = self.transfer_panels[direction]
         mode = str(self.google_route_combo.currentData() or "ask")
-        use_cloud = mode == "direct"
-        if virtual_drive_parts(folder) and mode == "ask":
+        drive_path = virtual_drive_parts(folder)
+        use_cloud = force_cloud or mode == "direct"
+        if drive_path and mode == "ask" and not force_cloud:
             prompt = QMessageBox(self)
             prompt.setWindowTitle("Как передавать в Google Drive?")
             prompt.setText("Выбрана папка Google Drive:\n" + folder)
-            prompt.setInformativeText("Через Neon — прямая выгрузка по OAuth2. Обычное копирование — файл затем синхронизирует клиент Google.")
+            prompt.setInformativeText(
+                "Через Neon — выбранный путь передаётся Rclone без облачного поиска папок. "
+                "Обычное копирование — файл затем синхронизирует клиент Google."
+            )
             direct = prompt.addButton("Через Neon", QMessageBox.ButtonRole.AcceptRole)
             local = prompt.addButton("Обычное копирование", QMessageBox.ButtonRole.NoRole)
             prompt.addButton("Отмена", QMessageBox.ButtonRole.RejectRole)
@@ -5099,10 +5114,52 @@ class MainWindow(QMainWindow):
         panel.destination.setText(folder)
         key = "upload_destination" if direction == "upload" else "destination"
         self.settings.setValue(key, folder)
-        if virtual_drive_parts(folder) and use_cloud:
-            # Cancel/error in the browser leaves the Explorer selection intact.
-            return self.choose_cloud_destination(direction, folder)
+        direct_key = f"google_explorer_destination/{direction}"
+        if drive_path and use_cloud:
+            # Keep the human-readable Explorer path on screen. It is converted
+            # to an Rclone destination only after Start is pressed.
+            self.settings.setValue(direct_key, folder)
+            panel.destination.setToolTip("Через Neon Rclone · без облачного поиска папок")
+            rclone_index = self.copy_engine_combo.findData("rclone")
+            if rclone_index >= 0:
+                self.copy_engine_combo.setCurrentIndex(rclone_index)
+            if not google_drive_connected():
+                self._cloud_picker_request = (direction, folder)
+                self.start_google_drive_oauth()
+        else:
+            self.settings.remove(direct_key)
+            panel.destination.setToolTip("")
+        self.persist_settings()
+        self.refresh_file_rows(direction)
         return True
+
+    def direct_google_destination(self, direction: str, value: str) -> bool:
+        if not virtual_drive_parts(value):
+            return False
+        if str(self.google_route_combo.currentData() or "ask") == "direct":
+            return True
+        saved = str(self.settings.value(f"google_explorer_destination/{direction}", ""))
+        return os.path.normcase(os.path.normpath(saved)) == os.path.normcase(os.path.normpath(value))
+
+    def resolve_explorer_google_destination(self, value: str) -> str:
+        parsed = virtual_drive_parts(value)
+        if not parsed:
+            raise ValueError("Сначала выберите конечную папку Google Drive в Проводнике.")
+        kind, drive_name, _names = parsed
+        shared_ids: dict[str, str] = {}
+        if kind == "shared":
+            cache_key = "google_shared_drive_id/" + drive_name
+            cached = str(self.settings.value(cache_key, ""))
+            if cached:
+                shared_ids[drive_name] = cached
+            else:
+                executable = self.resolved_rclone_executable()
+                if not executable:
+                    raise ValueError("Встроенный Rclone не найден. Переустановите его в настройках.")
+                shared_ids = DriveClient(executable).shared_drive_ids()
+                for name, identifier in shared_ids.items():
+                    self.settings.setValue("google_shared_drive_id/" + name, identifier)
+        return remote_from_explorer_path(value, shared_ids)
 
     def choose_destination(self) -> bool:
         return self.choose_destination_for("download")
@@ -5416,16 +5473,40 @@ class MainWindow(QMainWindow):
         if not panel.destination.text().strip():
             if not self.choose_destination_for(direction):
                 return
-        destination_text = panel.destination.text().strip()
-        detected, route_description = detect_direction(items, destination_text)
+        explorer_destination_text = panel.destination.text().strip()
+        destination_text = explorer_destination_text
+        direct_google = self.direct_google_destination(direction, explorer_destination_text)
+        detected, route_description = detect_direction(items, explorer_destination_text)
         if self.auto_direction_check.isChecked() and detected and detected != direction:
             if detected != "upload" or self.upload_addon_enabled:
                 previous_sources = panel.sources.toPlainText()
                 direction = detected
                 panel = self.bind_transfer_panel(direction)
                 panel.sources.setPlainText(previous_sources)
-                panel.destination.setText(destination_text)
+                panel.destination.setText(explorer_destination_text)
                 self.show_transfer_direction(direction)
+        if direct_google:
+            if not google_drive_connected():
+                self._cloud_picker_request = (direction, explorer_destination_text)
+                self._start_after_google_oauth = direction
+                self.start_google_drive_oauth()
+                return
+            try:
+                destination_text = self.resolve_explorer_google_destination(
+                    explorer_destination_text
+                )
+            except (RuntimeError, ValueError) as exc:
+                QMessageBox.critical(
+                    self,
+                    APP_NAME,
+                    "Не удалось подготовить выбранный путь для Neon Rclone:\n"
+                    f"{exc}\n\nПуть в Проводнике сохранён и не изменён.",
+                )
+                return
+            route_description = (
+                "Через Neon Rclone · путь сначала выбран в Проводнике · "
+                "облачный поиск папок отключён"
+            )
         remote_destination = is_rclone_remote_path(destination_text)
         if remote_destination:
             if not is_managed_drive_path(destination_text):
@@ -5509,6 +5590,7 @@ class MainWindow(QMainWindow):
                 "Не найдены необходимые движки:\n• " + "\n• ".join(missing_engines),
             )
             return
+        self.active_destination = destination
         if robocopy:
             self.robocopy_executable = robocopy
         if rclone:
@@ -5741,7 +5823,7 @@ class MainWindow(QMainWindow):
         worker.item_done.connect(self.on_item_done)
         self.workers[source] = worker
         if isinstance(worker, RcloneDownloader):
-            destination_text = self.current_transfer_panel().destination.text()
+            destination_text = self.active_destination or self.current_transfer_panel().destination.text()
             if self.active_transfer == "download" and self.download_buffer_check.isChecked():
                 if Path(source).is_file() and not is_rclone_remote_path(destination_text):
                     try:
@@ -5767,13 +5849,13 @@ class MainWindow(QMainWindow):
         elif turbo_file:
             worker.start_item(
                 source,
-                Path(self.current_transfer_panel().destination.text()),
+                Path(self.active_destination or self.current_transfer_panel().destination.text()),
                 self.effective_turbo_threads(),
             )
         else:
             worker.start_item(
                 source,
-                Path(self.current_transfer_panel().destination.text()),
+                Path(self.active_destination or self.current_transfer_panel().destination.text()),
                 selected_profile,
                 self.effective_directory_threads(),
             )
@@ -6047,6 +6129,7 @@ class MainWindow(QMainWindow):
         if not self.running:
             return
         self.running = False
+        self.active_destination = None
         self.metrics_timer.stop()
         self.source_check_timer.stop()
         for transfer_panel in self.transfer_panels.values():

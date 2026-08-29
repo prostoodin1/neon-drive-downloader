@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import os
+import tempfile
 import time
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -19,6 +21,7 @@ from neon_drive.drive_browser import (
     DriveFolderDialog,
     is_managed_drive_path,
     managed_options,
+    remote_from_explorer_path,
     virtual_drive_parts,
 )
 from neon_drive.transfer_direction import detect_direction, location_kind, location_label
@@ -97,6 +100,74 @@ class Beta9Tests(unittest.TestCase):
             virtual_drive_parts("G:/Доступные мне/Проект/Видео"),
             ("shared_with_me", "", ["Проект", "Видео"]),
         )
+
+    def test_explorer_path_converts_without_walking_cloud_folders(self):
+        self.assertEqual(
+            remote_from_explorer_path("G:/My Drive/Video/Final"),
+            "NeonGoogleDrive:Video/Final",
+        )
+        self.assertEqual(
+            remote_from_explorer_path(
+                "H:/Unidades compartidas/Clients Materials/Test carpet",
+                {"Clients Materials": "drive123"},
+            ),
+            "NeonGoogleDrive,team_drive=drive123:Test carpet",
+        )
+        self.assertEqual(
+            remote_from_explorer_path("G:/Доступные мне/Проект"),
+            "NeonGoogleDrive,shared_with_me:Проект",
+        )
+
+    def test_my_drive_resolution_never_queries_cloud_browser(self):
+        window = self.window()
+        with patch.object(DriveClient, "query", side_effect=AssertionError("no cloud search")):
+            remote = window.resolve_explorer_google_destination("G:/My Drive/Video")
+        self.assertEqual(remote, "NeonGoogleDrive:Video")
+
+    def test_shared_drive_resolution_only_reads_drive_ids_once(self):
+        window = self.window()
+        path = "H:/Unidades compartidas/Clients Materials/Test carpet"
+        with patch.object(DriveClient, "shared_drive_ids", return_value={"Clients Materials": "drive123"}) as ids, patch.object(
+            DriveClient, "folders", side_effect=AssertionError("folder walk is forbidden")
+        ):
+            self.assertEqual(
+                window.resolve_explorer_google_destination(path),
+                "NeonGoogleDrive,team_drive=drive123:Test carpet",
+            )
+            self.assertEqual(window.resolve_explorer_google_destination(path), "NeonGoogleDrive,team_drive=drive123:Test carpet")
+        ids.assert_called_once()
+
+    def test_oauth_starts_after_explorer_selection_not_before(self):
+        window = self.window()
+        path = "G:/My Drive/Video"
+        events = []
+        with patch("neon_drive.app.QFileDialog.getExistingDirectory", side_effect=lambda *_args: events.append("select") or path), patch(
+            "neon_drive.app.google_drive_connected", return_value=False
+        ), patch.object(window, "start_google_drive_oauth", side_effect=lambda: events.append("oauth")), patch(
+            "neon_drive.app.DriveFolderDialog"
+        ) as browser:
+            window.use_or_connect_google_drive()
+        self.assertEqual(events, ["select", "oauth"])
+        self.assertEqual(window.upload_destination.text(), path)
+        browser.assert_not_called()
+
+    def test_start_uses_resolved_remote_but_keeps_explorer_path_visible(self):
+        window = self.window()
+        window.upload_addon_enabled = True
+        path = "G:/My Drive/Video"
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / "movie.bin"
+            source.write_bytes(b"neon")
+            window.upload_sources.setPlainText(str(source))
+            with patch("neon_drive.app.google_drive_connected", return_value=True):
+                window.accept_destination_folder("upload", path, force_cloud=True)
+                with patch.object(window, "fill_worker_slots"):
+                    window.start_transfers("upload")
+            self.assertEqual(window.active_destination, "NeonGoogleDrive:Video")
+            self.assertEqual(window.upload_destination.text(), path)
+            self.assertTrue(window.running)
+            window.running = False
+            window.active_destination = None
 
     def test_physical_cloud_and_network_paths_are_auto_detected(self):
         self.assertEqual(location_kind("C:/Video/movie.mp4"), "physical")
