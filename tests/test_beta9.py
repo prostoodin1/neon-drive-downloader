@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import sqlite3
 import tempfile
 import time
 import unittest
@@ -19,6 +20,9 @@ from neon_drive.drive_browser import (
     DriveClient,
     DriveFolder,
     DriveFolderDialog,
+    ExplorerDriveTarget,
+    SharedDriveAccessError,
+    explorer_shared_drive_target,
     is_managed_drive_path,
     managed_options,
     remote_from_explorer_path,
@@ -136,6 +140,49 @@ class Beta9Tests(unittest.TestCase):
             )
             self.assertEqual(window.resolve_explorer_google_destination(path), "NeonGoogleDrive,team_drive=drive123:Test carpet")
         ids.assert_called_once()
+
+    def test_explorer_shared_drive_uses_exact_drivefs_folder_id(self):
+        path = "H:/Unidades compartidas/Clients Materials/Test carpet"
+        with tempfile.TemporaryDirectory() as temporary:
+            profile = Path(temporary) / "100"
+            profile.mkdir()
+            database = sqlite3.connect(profile / "metadata_sqlite_db")
+            database.execute(
+                "CREATE TABLE items (stable_id INTEGER PRIMARY KEY, id TEXT, "
+                "local_title TEXT, is_folder BOOLEAN, team_drive_stable_id INTEGER, "
+                "is_tombstone BOOLEAN)"
+            )
+            database.execute(
+                "CREATE TABLE stable_parents (item_stable_id INTEGER, parent_stable_id INTEGER)"
+            )
+            database.executemany(
+                "INSERT INTO items VALUES (?, ?, ?, 1, 10, 0)",
+                [
+                    (10, "drive123", "Clients Materials"),
+                    (20, "folder456", "Test carpet"),
+                ],
+            )
+            database.execute("INSERT INTO stable_parents VALUES (20, 10)")
+            database.commit()
+            database.close()
+            with patch.dict(os.environ, {"NEON_DRIVEFS_DIR": temporary}):
+                target = explorer_shared_drive_target(path)
+
+        self.assertEqual(target, ExplorerDriveTarget("drive123", "folder456"))
+        self.assertEqual(
+            remote_from_explorer_path(path, {"Clients Materials": "drive123"}, target),
+            "NeonGoogleDrive,team_drive=drive123,root_folder_id=folder456:",
+        )
+
+    def test_shared_drive_account_mismatch_is_reported_before_transfer(self):
+        window = self.window()
+        path = "H:/Unidades compartidas/Clients Materials/Test carpet"
+        target = ExplorerDriveTarget("drive-from-explorer", "folder-from-explorer")
+        with patch("neon_drive.app.explorer_shared_drive_target", return_value=target), patch.object(
+            DriveClient, "shared_drive_ids", return_value={}
+        ):
+            with self.assertRaises(SharedDriveAccessError):
+                window.resolve_explorer_google_destination(path)
 
     def test_oauth_starts_after_explorer_selection_not_before(self):
         window = self.window()

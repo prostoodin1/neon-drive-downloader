@@ -4,8 +4,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 
 from PySide6.QtCore import QSettings
+
+from .platform_support import app_data_directory
 
 
 STATS_PREFIX = "transfer_statistics"
@@ -22,10 +25,40 @@ class TransferStatsSnapshot:
 
 
 class TransferStats:
-    """Store successful transfer bytes in the application's QSettings file."""
+    """Store successful bytes outside the versioned application settings.
 
-    def __init__(self, settings: QSettings) -> None:
-        self.settings = settings
+    ``settings`` is retained as a migration source for installations that used
+    the old in-settings counter.  The dedicated INI file lives in application
+    data, so replacing the executable or changing the settings namespace during
+    an upgrade cannot reset the lifetime totals.
+    """
+
+    def __init__(self, settings: QSettings, storage_path: Path | None = None) -> None:
+        self.legacy_settings = settings
+        self.storage_path = storage_path or (
+            app_data_directory() / "transfer-statistics.ini"
+        )
+        self.storage_path.parent.mkdir(parents=True, exist_ok=True)
+        self.settings = QSettings(str(self.storage_path), QSettings.Format.IniFormat)
+        self._migrate_legacy_values()
+
+    def _migrate_legacy_values(self) -> None:
+        if self.settings.contains(f"{STATS_PREFIX}/schema_version"):
+            return
+        keys = (
+            "total_bytes",
+            "download_bytes",
+            "upload_bytes",
+            "period_start",
+            "month",
+            "auto_monthly_reset",
+        )
+        for key in keys:
+            legacy_key = f"{STATS_PREFIX}/{key}"
+            if self.legacy_settings.contains(legacy_key):
+                self.settings.setValue(legacy_key, self.legacy_settings.value(legacy_key))
+        self.settings.setValue(f"{STATS_PREFIX}/schema_version", 1)
+        self.settings.sync()
 
     @staticmethod
     def _now(value: datetime | None = None) -> datetime:

@@ -34,6 +34,7 @@ def main() -> int:
         with tempfile.TemporaryDirectory(prefix="neon-test-") as temp_dir:
             os.environ["NEON_DRIVE_SETTINGS_DIR"] = temp_dir
             os.environ["NEON_DRIVE_DATA_DIR"] = str(Path(temp_dir) / "data")
+            os.environ["NEON_DRIVEFS_DIR"] = str(Path(temp_dir) / "drivefs")
             QSettings.setDefaultFormat(QSettings.Format.IniFormat)
             QSettings.setPath(
                 QSettings.Format.IniFormat, QSettings.Scope.UserScope, temp_dir

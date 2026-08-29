@@ -2,10 +2,13 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+import sqlite3
 import subprocess
 import threading
 from dataclasses import dataclass
+from pathlib import Path
 
 from PySide6.QtCore import QThread, Qt, Signal
 from PySide6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QPushButton
@@ -22,6 +25,89 @@ MY_NAMES = {"my drive", "мой диск", "mi unidad", "mon drive"}
 SHARED_WITH_ME_NAMES = {
     "shared with me", "доступные мне", "доступно мне", "compartido conmigo", "partagés avec moi"
 }
+
+
+class SharedDriveAccessError(ValueError):
+    """The Drive for desktop account can see a drive that Neon OAuth cannot."""
+
+    def __init__(self, drive_name: str, drive_letter: str = "") -> None:
+        self.drive_name = drive_name
+        self.drive_letter = drive_letter
+        location = f" на диске {drive_letter}" if drive_letter else " в Проводнике"
+        super().__init__(
+            f"Google Drive{location} видит общий диск «{drive_name}», "
+            "но подключённый к Neon OAuth-аккаунт не имеет к нему доступа."
+        )
+
+
+@dataclass(frozen=True)
+class ExplorerDriveTarget:
+    drive_id: str
+    folder_id: str
+
+
+def _drivefs_root() -> Path:
+    override = os.environ.get("NEON_DRIVEFS_DIR")
+    if override:
+        return Path(override).expanduser()
+    local = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
+    return local / "Google" / "DriveFS"
+
+
+def explorer_shared_drive_target(value: str) -> ExplorerDriveTarget | None:
+    """Resolve an Explorer folder through Drive for desktop's read-only cache.
+
+    This avoids searching cloud folders by display name.  Drive for desktop
+    already knows the exact Shared Drive and folder IDs for a path the user has
+    selected in Explorer.  Its metadata schema is treated as an optional cache:
+    any missing/changed database simply falls back to the regular Drive API.
+    """
+    parsed = virtual_drive_parts(value)
+    if not parsed or parsed[0] != "shared" or not parsed[1]:
+        return None
+    _kind, drive_name, names = parsed
+    root = _drivefs_root()
+    if not root.is_dir():
+        return None
+    for database in root.glob("*/metadata_sqlite_db"):
+        try:
+            connection = sqlite3.connect(
+                f"file:{database.as_posix()}?mode=ro", uri=True, timeout=1
+            )
+            try:
+                roots = connection.execute(
+                    "SELECT stable_id, id FROM items "
+                    "WHERE local_title = ? AND is_folder = 1 "
+                    "AND team_drive_stable_id = stable_id AND is_tombstone = 0",
+                    (drive_name,),
+                ).fetchall()
+                for stable_id, drive_id in roots:
+                    current_stable_id = int(stable_id)
+                    current_id = str(drive_id)
+                    matched = True
+                    for name in names:
+                        children = connection.execute(
+                            "SELECT i.stable_id, i.id FROM items i "
+                            "JOIN stable_parents p ON p.item_stable_id = i.stable_id "
+                            "WHERE p.parent_stable_id = ? AND i.local_title = ? "
+                            "AND i.is_folder = 1 AND i.is_tombstone = 0",
+                            (current_stable_id, name),
+                        ).fetchall()
+                        if len(children) != 1:
+                            matched = False
+                            break
+                        current_stable_id, current_id = int(children[0][0]), str(children[0][1])
+                    if (
+                        matched
+                        and ID_PATTERN.fullmatch(str(drive_id))
+                        and ID_PATTERN.fullmatch(current_id)
+                    ):
+                        return ExplorerDriveTarget(str(drive_id), current_id)
+            finally:
+                connection.close()
+        except (OSError, sqlite3.Error, TypeError, ValueError):
+            continue
+    return None
 
 
 def is_managed_drive_path(value: str) -> bool:
@@ -57,7 +143,9 @@ def managed_options(value: str) -> dict[str, str]:
 
 
 def remote_from_explorer_path(
-    value: str, shared_drive_ids: dict[str, str] | None = None
+    value: str,
+    shared_drive_ids: dict[str, str] | None = None,
+    shared_target: ExplorerDriveTarget | None = None,
 ) -> str:
     """Convert a Drive for desktop path without walking its cloud folders."""
     parsed = virtual_drive_parts(value)
@@ -69,6 +157,16 @@ def remote_from_explorer_path(
     elif kind == "shared_with_me":
         root = "NeonGoogleDrive,shared_with_me:"
     else:
+        if shared_target is not None:
+            if not (
+                ID_PATTERN.fullmatch(shared_target.drive_id)
+                and ID_PATTERN.fullmatch(shared_target.folder_id)
+            ):
+                raise ValueError("Google Drive вернул некорректный ID выбранной папки.")
+            return (
+                "NeonGoogleDrive,team_drive="
+                f"{shared_target.drive_id},root_folder_id={shared_target.folder_id}:"
+            )
         identifiers = {name.casefold(): identifier for name, identifier in (shared_drive_ids or {}).items()}
         drive_id = identifiers.get(drive_name.casefold())
         if not drive_id or not ID_PATTERN.fullmatch(drive_id):

@@ -88,6 +88,8 @@ from .transfer_direction import detect_direction, location_label
 from .drive_browser import (
     DriveClient,
     DriveFolderDialog,
+    SharedDriveAccessError,
+    explorer_shared_drive_target,
     is_managed_drive_path,
     remote_from_explorer_path,
     virtual_drive_parts,
@@ -1453,6 +1455,7 @@ class MainWindow(QMainWindow):
         self.cloud_browser: DriveFolderDialog | None = None
         self._cloud_picker_request: tuple[str, str] | None = None
         self._start_after_google_oauth: str | None = None
+        self._shared_drive_ids_cache: dict[str, str] | None = None
         self.snapshot_threads: dict[str, SourceSnapshotThread] = {}
         self.snapshot_results: dict[str, tuple] = {}
         self.robocopy_executable = "robocopy.exe"
@@ -4610,6 +4613,8 @@ class MainWindow(QMainWindow):
 
     @Slot(str)
     def google_drive_oauth_succeeded(self, _config_path: str) -> None:
+        self._shared_drive_ids_cache = None
+        self.settings.remove("google_shared_drive_id")
         self.append_log("Google Drive OAuth2: аккаунт подключён напрямую к Neon.\n")
         QMessageBox.information(
             self,
@@ -5148,17 +5153,26 @@ class MainWindow(QMainWindow):
         kind, drive_name, _names = parsed
         shared_ids: dict[str, str] = {}
         if kind == "shared":
-            cache_key = "google_shared_drive_id/" + drive_name
-            cached = str(self.settings.value(cache_key, ""))
-            if cached:
-                shared_ids[drive_name] = cached
-            else:
+            target = explorer_shared_drive_target(value)
+            if self._shared_drive_ids_cache is None:
                 executable = self.resolved_rclone_executable()
                 if not executable:
                     raise ValueError("Встроенный Rclone не найден. Переустановите его в настройках.")
-                shared_ids = DriveClient(executable).shared_drive_ids()
-                for name, identifier in shared_ids.items():
-                    self.settings.setValue("google_shared_drive_id/" + name, identifier)
+                self._shared_drive_ids_cache = DriveClient(executable).shared_drive_ids()
+            shared_ids = self._shared_drive_ids_cache
+            available_ids = set(shared_ids.values())
+            if target is not None:
+                if target.drive_id not in available_ids:
+                    drive = Path(value).drive or value[:2]
+                    raise SharedDriveAccessError(drive_name, drive)
+                return remote_from_explorer_path(
+                    value, shared_ids, shared_target=target
+                )
+            if drive_name.casefold() not in {
+                name.casefold() for name in shared_ids
+            }:
+                drive = Path(value).drive or value[:2]
+                raise SharedDriveAccessError(drive_name, drive)
         return remote_from_explorer_path(value, shared_ids)
 
     def choose_destination(self) -> bool:
@@ -5495,6 +5509,25 @@ class MainWindow(QMainWindow):
                 destination_text = self.resolve_explorer_google_destination(
                     explorer_destination_text
                 )
+            except SharedDriveAccessError as exc:
+                prompt = QMessageBox(self)
+                prompt.setIcon(QMessageBox.Icon.Warning)
+                prompt.setWindowTitle(APP_NAME)
+                prompt.setText(str(exc))
+                prompt.setInformativeText(
+                    "Выбранный путь сохранён. Переподключите Neon и в окне Google "
+                    "выберите тот же аккаунт, который подключён к этому диску в Проводнике."
+                )
+                reconnect = prompt.addButton(
+                    "Переподключить Google Drive", QMessageBox.ButtonRole.AcceptRole
+                )
+                prompt.addButton("Отмена", QMessageBox.ButtonRole.RejectRole)
+                prompt.exec()
+                if prompt.clickedButton() == reconnect:
+                    self._cloud_picker_request = (direction, explorer_destination_text)
+                    self._start_after_google_oauth = direction
+                    self.start_google_drive_oauth()
+                return
             except (RuntimeError, ValueError) as exc:
                 QMessageBox.critical(
                     self,
