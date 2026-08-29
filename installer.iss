@@ -1,9 +1,9 @@
 #ifndef MyAppVersion
-  #define MyAppVersion "5.5.0-beta.8"
+  #define MyAppVersion "5.5.0-beta.9"
 #endif
 
 #ifndef MyAppFileVersion
-  #define MyAppFileVersion "5.5.0.8"
+  #define MyAppFileVersion "5.5.0.9"
 #endif
 
 #define MyAppName "Neon Drive"

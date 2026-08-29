@@ -1,7 +1,16 @@
-# Neon Drive 5.5.0 Beta 8
+# Neon Drive 5.5.0 Beta 9
 
 ## Исправления и новые возможности
 
+- Окно выбора Google Drive теперь всегда имеет мягкий белый фон, чёрный текст
+  и контрастное выделение — независимо от выбранной темы основного приложения.
+- Добавлен раздел **«Доступные мне»** для папок, которыми поделились с подключённым
+  OAuth-аккаунтом. После выбора Neon сохраняет точный ID общей папки и может
+  переходить по её вложенным каталогам.
+- Автоматически распознаются физические диски Windows (`C:`, `D:` и другие),
+  сетевые пути, виртуальные папки Google Drive и прямые адреса Neon/Rclone.
+  Подписи «Откуда» и «Куда» меняются прямо при вводе пути, а режим загрузки или
+  выгрузки выбирается автоматически там, где направление однозначно.
 - Выбор «Моего диска» и общих дисков Google Drive через OAuth2. Вложенная папка
   подтверждается по ID, а нажатие Google Drive больше не стирает назначение.
 - Сопоставление пути из Проводника, включая `H:/Unidades compartidas/Clients Materials/Test carpet`.
@@ -29,9 +38,9 @@
 
 | Система | Приложение со встроенным Rclone | Менеджер версий |
 | :--- | :--- | :--- |
-| 🪟 **Windows 10 / 11 · x64** | [⬇ Скачать Setup.exe](https://github.com/prostoodin1/neon-drive-downloader/releases/download/v5.5.0-beta.8/NeonDrive-Setup.exe) | [⬇ Скачать Installer.exe](https://github.com/prostoodin1/neon-drive-downloader/releases/download/v5.5.0-beta.8/NeonDriveInstaller.exe) |
-| 🍎 **Mac · Apple Silicon** | [⬇ Скачать приложение ARM64.dmg](https://github.com/prostoodin1/neon-drive-downloader/releases/download/v5.5.0-beta.8/NeonDrive-macOS-arm64.dmg) | [⬇ Скачать установщик ARM64.dmg](https://github.com/prostoodin1/neon-drive-downloader/releases/download/v5.5.0-beta.8/NeonDriveInstaller-macOS-arm64.dmg) |
-| 💻 **Mac · Intel** | [⬇ Скачать приложение x64.dmg](https://github.com/prostoodin1/neon-drive-downloader/releases/download/v5.5.0-beta.8/NeonDrive-macOS-x64.dmg) | [⬇ Скачать установщик x64.dmg](https://github.com/prostoodin1/neon-drive-downloader/releases/download/v5.5.0-beta.8/NeonDriveInstaller-macOS-x64.dmg) |
+| 🪟 **Windows 10 / 11 · x64** | [⬇ Скачать Setup.exe](https://github.com/prostoodin1/neon-drive-downloader/releases/download/v5.5.0-beta.9/NeonDrive-Setup.exe) | [⬇ Скачать Installer.exe](https://github.com/prostoodin1/neon-drive-downloader/releases/download/v5.5.0-beta.9/NeonDriveInstaller.exe) |
+| 🍎 **Mac · Apple Silicon** | [⬇ Скачать приложение ARM64.dmg](https://github.com/prostoodin1/neon-drive-downloader/releases/download/v5.5.0-beta.9/NeonDrive-macOS-arm64.dmg) | [⬇ Скачать установщик ARM64.dmg](https://github.com/prostoodin1/neon-drive-downloader/releases/download/v5.5.0-beta.9/NeonDriveInstaller-macOS-arm64.dmg) |
+| 💻 **Mac · Intel** | [⬇ Скачать приложение x64.dmg](https://github.com/prostoodin1/neon-drive-downloader/releases/download/v5.5.0-beta.9/NeonDrive-macOS-x64.dmg) | [⬇ Скачать установщик x64.dmg](https://github.com/prostoodin1/neon-drive-downloader/releases/download/v5.5.0-beta.9/NeonDriveInstaller-macOS-x64.dmg) |
 
 [Все версии и изменения](https://github.com/prostoodin1/neon-drive-downloader/releases).
 

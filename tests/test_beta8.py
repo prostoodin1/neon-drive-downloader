@@ -89,7 +89,7 @@ class Beta8Tests(unittest.TestCase):
             popen.return_value.communicate.return_value = (b'[{"id":"drive1","name":"Shared"}]', b"")
             popen.return_value.returncode = 0
             roots = client.roots()
-        self.assertEqual(roots[1].drive_id, "drive1")
+        self.assertEqual(next(root for root in roots if root.drive_id).drive_id, "drive1")
         self.assertIn("drives", popen.call_args.args[0])
         self.assertFalse(popen.call_args.kwargs.get("shell", False))
 

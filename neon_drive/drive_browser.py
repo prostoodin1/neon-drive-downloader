@@ -14,9 +14,14 @@ from .google_drive import GOOGLE_DRIVE_ROOT, managed_rclone_config_path
 
 
 ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
-MANAGED_PATH = re.compile(r"^NeonGoogleDrive(?:,(?:team_drive|root_folder_id)=[A-Za-z0-9_-]*)*:")
+MANAGED_PATH = re.compile(
+    r"^NeonGoogleDrive(?:,(?:(?:team_drive|root_folder_id)=[A-Za-z0-9_-]+|shared_with_me(?:=true)?))*:"
+)
 SHARED_NAMES = {"shared drives", "unidades compartidas", "общие диски", "drives partagés"}
 MY_NAMES = {"my drive", "мой диск", "mi unidad", "mon drive"}
+SHARED_WITH_ME_NAMES = {
+    "shared with me", "доступные мне", "доступно мне", "compartido conmigo", "partagés avec moi"
+}
 
 
 def is_managed_drive_path(value: str) -> bool:
@@ -32,7 +37,23 @@ def virtual_drive_parts(value: str) -> tuple[str, str, list[str]] | None:
             return ("shared", remaining[0], remaining[1:]) if remaining else ("shared", "", [])
         if lowered in MY_NAMES:
             return "my", "", parts[index + 1:]
+        if lowered in SHARED_WITH_ME_NAMES:
+            return "shared_with_me", "", parts[index + 1:]
     return None
+
+
+def managed_options(value: str) -> dict[str, str]:
+    match = MANAGED_PATH.match(value.strip())
+    if not match:
+        return {}
+    options: dict[str, str] = {}
+    for part in match.group(0).rstrip(":").split(",")[1:]:
+        if "=" in part:
+            key, option_value = part.split("=", 1)
+            options[key] = option_value
+        else:
+            options[part] = "true"
+    return options
 
 
 @dataclass(frozen=True)
@@ -41,12 +62,18 @@ class DriveFolder:
     folder_id: str
     drive_id: str = ""
     label: str = ""
+    shared_with_me: bool = False
 
     @property
     def remote(self) -> str:
         if not ID_PATTERN.fullmatch(self.folder_id) or (self.drive_id and not ID_PATTERN.fullmatch(self.drive_id)):
             raise ValueError("Некорректный ID папки Google Drive.")
-        return f"NeonGoogleDrive,team_drive={self.drive_id},root_folder_id={self.folder_id}:"
+        if self.shared_with_me:
+            return "NeonGoogleDrive,shared_with_me:"
+        options = ([f"team_drive={self.drive_id}"] if self.drive_id else []) + [
+            f"root_folder_id={self.folder_id}"
+        ]
+        return "NeonGoogleDrive," + ",".join(options) + ":"
 
 
 class DriveClient:
@@ -96,7 +123,10 @@ class DriveClient:
                 self._process = None
 
     def roots(self) -> list[DriveFolder]:
-        roots = [DriveFolder("Мой диск", "root", label="Мой диск")]
+        roots = [
+            DriveFolder("Мой диск", "root", label="Мой диск"),
+            DriveFolder("Доступные мне", "root", label="Доступные мне", shared_with_me=True),
+        ]
         for drive in self.query(["backend", "drives", GOOGLE_DRIVE_ROOT]):
             name, identifier = str(drive.get("name", "")), str(drive.get("id", ""))
             if name and ID_PATTERN.fullmatch(identifier):
@@ -109,6 +139,9 @@ class DriveClient:
             identifier = str(item.get("ID", ""))
             if item.get("IsDir") and ID_PATTERN.fullmatch(identifier):
                 name = str(item.get("Name", item.get("Path", "")))
+                # shared_with_me is only needed to list the virtual root. Once
+                # a shared folder ID is known, root_folder_id gives reliable
+                # access to all of its children and permits writable folders.
                 result.append(DriveFolder(name, identifier, parent.drive_id, parent.label + " / " + name))
         return sorted(result, key=lambda folder: folder.name.casefold())
 
@@ -116,10 +149,18 @@ class DriveClient:
         parts = virtual_drive_parts(value)
         managed = MANAGED_PATH.match(value)
         if managed:
-            options = dict(part.split("=", 1) for part in managed.group(0).rstrip(":").split(",")[1:])
+            options = managed_options(value)
+            if options.get("shared_with_me") == "true":
+                base = next((folder for folder in roots if folder.shared_with_me), None)
+                if base is None:
+                    raise ValueError("Раздел «Доступные мне» недоступен текущему аккаунту.")
+                return [base]
             drive_id = options.get("team_drive", "")
             folder_id = options.get("root_folder_id") or drive_id or "root"
-            base = next((folder for folder in roots if folder.drive_id == drive_id), None)
+            base = next(
+                (folder for folder in roots if folder.drive_id == drive_id and not folder.shared_with_me),
+                None,
+            )
             if base is None:
                 raise ValueError("Выбранный общий диск недоступен текущему аккаунту.")
             trail = [base] if folder_id in (base.folder_id, "root") else [
@@ -135,7 +176,12 @@ class DriveClient:
         if not parts:
             return []
         kind, drive_name, names = parts
-        matches = [folder for folder in roots if (not folder.drive_id if kind == "my" else folder.drive_id and folder.name == drive_name)]
+        if kind == "shared_with_me":
+            matches = [folder for folder in roots if folder.shared_with_me]
+        elif kind == "my":
+            matches = [folder for folder in roots if not folder.drive_id and not folder.shared_with_me]
+        else:
+            matches = [folder for folder in roots if folder.drive_id and folder.name == drive_name]
         if len(matches) != 1:
             raise ValueError("Общий диск не найден или его имя неоднозначно. Выберите диск вручную. Исходный путь сохранён.")
         trail = [matches[0]]
@@ -164,6 +210,7 @@ class BrowseThread(QThread):
 class DriveFolderDialog(QDialog):
     def __init__(self, executable: str, original: str = "", parent=None):
         super().__init__(parent)
+        self.setObjectName("cloudFolderDialog")
         self.setWindowTitle("Google Drive · папка назначения")
         self.resize(660, 520)
         self.setMinimumSize(480, 360)
@@ -173,8 +220,28 @@ class DriveFolderDialog(QDialog):
         self.selected_folder: DriveFolder | None = None
         self.thread: BrowseThread | None = None
         self.closing = False
+        self.setStyleSheet("""
+            QDialog#cloudFolderDialog { background: #f8fafd; color: #202124; }
+            QDialog#cloudFolderDialog QLabel { color: #202124; background: transparent; }
+            QDialog#cloudFolderDialog QListWidget {
+                background: #ffffff; color: #202124; border: 1px solid #dadce0;
+                border-radius: 10px; padding: 6px; outline: none;
+            }
+            QDialog#cloudFolderDialog QListWidget::item {
+                color: #202124; background: #ffffff; padding: 10px 8px; border-radius: 6px;
+            }
+            QDialog#cloudFolderDialog QListWidget::item:hover { background: #f1f3f4; color: #202124; }
+            QDialog#cloudFolderDialog QListWidget::item:selected { background: #d2e3fc; color: #174ea6; }
+            QDialog#cloudFolderDialog QPushButton {
+                background: #ffffff; color: #202124; border: 1px solid #dadce0;
+                border-radius: 8px; min-height: 34px; padding: 0 14px;
+            }
+            QDialog#cloudFolderDialog QPushButton:hover { background: #f1f3f4; color: #202124; }
+            QDialog#cloudFolderDialog QPushButton:disabled { background: #f1f3f4; color: #80868b; }
+            QDialog#cloudFolderDialog QPushButton#primary { background: #d2e3fc; color: #202124; }
+        """)
         layout = QVBoxLayout(self)
-        self.path_label = QLabel("Мой диск и общие диски")
+        self.path_label = QLabel("Мой диск, доступные мне и общие диски")
         self.path_label.setWordWrap(True)
         layout.addWidget(self.path_label)
         if original:
@@ -244,11 +311,18 @@ class DriveFolderDialog(QDialog):
             item.setToolTip(folder.label + "\nID: " + folder.folder_id)
             item.setData(Qt.ItemDataRole.UserRole, folder)
             self.list.addItem(item)
-        self.path_label.setText(self.trail[-1].label if self.trail else "Мой диск и общие диски")
-        self.status.setText("Двойной щелчок — открыть папку. Кнопка ниже — подтвердить назначение.")
+        self.path_label.setText(
+            self.trail[-1].label if self.trail else "Мой диск, доступные мне и общие диски"
+        )
+        shared_root = bool(self.trail and self.trail[-1].shared_with_me)
+        self.status.setText(
+            "Откройте папку, которой с вами поделились: корень «Доступные мне» выбрать нельзя."
+            if shared_root else
+            "Двойной щелчок — открыть папку. Кнопка ниже — подтвердить назначение."
+        )
         self.list.setEnabled(True)
         self.back.setEnabled(bool(self.trail))
-        self.choose.setEnabled(bool(self.trail))
+        self.choose.setEnabled(bool(self.trail) and not shared_root)
 
     def enter_folder(self, item):
         folder = item.data(Qt.ItemDataRole.UserRole)

@@ -84,7 +84,7 @@ from PySide6.QtWidgets import (
 from . import __version__
 from .settings_store import create_settings
 from .transfer_buffer import TransferBuffer
-from .transfer_direction import detect_direction
+from .transfer_direction import detect_direction, location_label
 from .drive_browser import DriveFolderDialog, is_managed_drive_path, virtual_drive_parts
 from .addons import (
     install_upload_addon,
@@ -1900,13 +1900,15 @@ class MainWindow(QMainWindow):
         path_grid = QGridLayout()
         path_grid.setHorizontalSpacing(16)
         path_grid.setVerticalSpacing(6)
-        path_grid.addWidget(
-            self.label("ОТКУДА · ЛОКАЛЬНО" if upload else "ОТКУДА · СЕТЕВОЙ ДИСК"),
-            0,
-            0,
+        source_heading_label = self.label(
+            "ОТКУДА · ФИЗИЧЕСКИЙ ДИСК" if upload else "ОТКУДА · СЕТЕВОЙ ДИСК"
         )
+        path_grid.addWidget(source_heading_label, 0, 0)
         destination_heading = QHBoxLayout()
-        destination_heading.addWidget(self.label("КУДА · СЕТЕВОЙ ДИСК" if upload else "КУДА · ЛОКАЛЬНО"), 1)
+        destination_heading_label = self.label(
+            "КУДА · СЕТЕВОЙ ДИСК" if upload else "КУДА · ФИЗИЧЕСКИЙ ДИСК"
+        )
+        destination_heading.addWidget(destination_heading_label, 1)
         destination_heading.addWidget(google_drive_button)
         path_grid.addLayout(destination_heading, 0, 2)
         direction_toggle_button = QPushButton("⇅")
@@ -1949,10 +1951,18 @@ class MainWindow(QMainWindow):
         route_note = QLabel("Выберите источник и назначение.", objectName="settingDescription")
         route_note.setWordWrap(True)
         def update_route_note() -> None:
+            source_items = [line.strip() for line in sources.toPlainText().splitlines() if line.strip()]
             _, description = detect_direction(
-                [line.strip() for line in sources.toPlainText().splitlines() if line.strip()],
+                source_items,
                 destination.text(),
             )
+            if source_items:
+                source_labels = {location_label(item) for item in source_items}
+                source_heading_label.setText(
+                    "ОТКУДА · " + (next(iter(source_labels)) if len(source_labels) == 1 else "СМЕШАННЫЕ ПУТИ")
+                )
+            if destination.text().strip():
+                destination_heading_label.setText("КУДА · " + location_label(destination.text()))
             selected_label = str(self.settings.value("cloud_label/" + destination.text(), ""))
             route_note.setText("Прямая выгрузка → " + selected_label if selected_label else description)
         sources.textChanged.connect(update_route_note)
