@@ -1,5 +1,20 @@
 # Changelog
 
+## 5.5.0-beta.9
+
+- Select the final Google Drive destination in Explorer/Finder and keep that
+  human-readable path visible while Neon prepares the managed Rclone target.
+- Resolve Windows Shared Drive destinations from Drive for desktop's read-only
+  metadata IDs, avoiding cloud folder-name walks and preventing accidental fallback.
+- Detect an OAuth account without access to the Explorer Shared Drive and offer
+  reconnection while preserving the chosen path and automatic start request.
+- Move successful-transfer totals into a dedicated application-data file and
+  migrate legacy values so application updates cannot reset the counter.
+- Add automatic local/physical/network/cloud path classification, visible Stop,
+  separate replace/add file buttons, and the Extreme 1 GiB upload-chunk profile.
+- Keep installers independent of GitHub Desktop/CLI/login and verify the complete
+  Windows/macOS packages through the release workflow.
+
 ## 5.5.0-beta.7
 
 - Added Google Drive dark palette and contextual multicolor buttons.
