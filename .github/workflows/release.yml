@@ -83,7 +83,7 @@ jobs:
       - name: Install dependencies
         run: python -m pip install -r requirements.txt
       - name: Run cross-platform tests
-        run: python scripts/run_tests.py tests.test_copy_engines tests.test_google_drive tests.test_updater tests.test_platform_support tests.test_beta3 tests.test_beta4 tests.test_beta6 tests.test_beta7 tests.test_beta8 tests.test_beta9 tests.test_beta10 tests.test_beta56 tests.test_single_instance tests.test_windows_startup.WindowsStartupTests.test_macos_launch_agent_can_be_enabled_and_removed tests.test_rclone_manager.RcloneManagerTests.test_macos_archive_is_verified_and_installed_as_executable
+        run: python scripts/run_tests.py tests.test_copy_engines tests.test_google_drive tests.test_updater tests.test_platform_support tests.test_beta3 tests.test_beta4 tests.test_beta5 tests.test_beta6 tests.test_beta7 tests.test_beta8 tests.test_beta9 tests.test_beta10 tests.test_beta56 tests.test_single_instance tests.test_windows_startup.WindowsStartupTests.test_macos_launch_agent_can_be_enabled_and_removed tests.test_rclone_manager.RcloneManagerTests.test_macos_archive_is_verified_and_installed_as_executable
       - name: Download verified native Rclone
         run: python scripts/fetch_rclone.py --platform osx --arch ${{ matrix.rclone_arch }} --force
       - name: Verify real transfer and cancellation

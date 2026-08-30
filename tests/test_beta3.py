@@ -159,24 +159,24 @@ class Beta3Tests(unittest.TestCase):
             config,
             remote_name=GOOGLE_DRIVE_REMOTE,
             kind="personal",
-            identity={"email": "personal@example.com"},
+            identity={"email": "personal.user@gmail.com"},
         )
         store_google_drive_token(
             token,
             config,
             remote_name="NeonGoogleDrive_team",
             kind="team",
-            identity={"email": "team@example.com"},
+            identity={"email": "team.user@company.com"},
         )
         window = self.window()
         window.refresh_google_drive_status()
 
         entries = [window.google_account_combo.itemText(index) for index in range(2)]
-        self.assertTrue(any("personal@example.com" in entry for entry in entries))
-        self.assertTrue(any("team@example.com" in entry for entry in entries))
+        self.assertTrue(any("personal.user@gmail.com" in entry for entry in entries))
+        self.assertTrue(any("team.user@company.com" in entry for entry in entries))
         team_index = window.google_account_combo.findData("NeonGoogleDrive_team")
         window.google_account_combo.setCurrentIndex(team_index)
-        self.assertIn("team@example.com", window.google_account_identity.text())
+        self.assertIn("team.user@company.com", window.google_account_identity.text())
 
 
 if __name__ == "__main__":

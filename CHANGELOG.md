@@ -1,5 +1,18 @@
 # Changelog
 
+## 5.6.0-beta.5
+
+- Show the exact Google-returned email as `OAuth2 connected to` for every account.
+  Placeholder addresses such as `team@example.com` are rejected and a reconnect is
+  requested instead of presenting test metadata as a real identity.
+- Require a verified Google email before saving a newly authorized OAuth profile and
+  repeat the same identity in the success dialog, account selector, badge, and details.
+- Serialize direct Google Drive files through one shared Neon queue. Independent Rclone
+  processes no longer contend during Drive finalization, and every selected file starts
+  automatically after the previous file has been accepted by Google.
+- Distinguish `bytes sent` from `file completed`: the row shows final verification and
+  the overall indicator cannot claim 100% until every Rclone process exits successfully.
+
 ## 5.6.0-beta.4
 
 - Detect Google Drive `401 Invalid Credentials` separately from folder/path errors.

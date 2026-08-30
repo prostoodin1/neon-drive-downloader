@@ -68,19 +68,19 @@ class GoogleDriveTests(unittest.TestCase):
                 config_path,
                 remote_name=GOOGLE_DRIVE_REMOTE,
                 kind="personal",
-                identity={"email": "one@example.com", "display_name": "One"},
+                identity={"email": "one.user@gmail.com", "display_name": "One"},
             )
             store_google_drive_token(
                 second,
                 config_path,
                 remote_name="NeonGoogleDrive_workspace",
                 kind="workspace",
-                identity={"email": "two@company.example", "display_name": "Two"},
+                identity={"email": "two@company.com", "display_name": "Two"},
             )
 
             accounts = google_drive_accounts(config_path)
 
-            self.assertEqual([account.email for account in accounts], ["one@example.com", "two@company.example"])
+            self.assertEqual([account.email for account in accounts], ["one.user@gmail.com", "two@company.com"])
             self.assertEqual(accounts[1].kind, "workspace")
             self.assertEqual(google_drive_root(accounts[1].remote_name), "NeonGoogleDrive_workspace:")
             self.assertTrue(

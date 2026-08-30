@@ -125,6 +125,7 @@ from .google_drive import (
     new_google_drive_remote_name,
     oauth_completion_template_path,
     store_google_drive_token,
+    verified_google_email,
 )
 from .platform_support import (
     app_data_directory,
@@ -1474,6 +1475,12 @@ class GoogleDriveOAuthThread(QThread):
                 )
             token = extract_authorize_token(output)
             identity = fetch_google_drive_identity(token)
+            email = verified_google_email(identity.get("email", ""))
+            if not email:
+                raise RuntimeError(
+                    "Google не вернул почту владельца OAuth2. Подключение не сохранено: "
+                    "повторите вход и выберите нужный Google-аккаунт."
+                )
             path = store_google_drive_token(
                 token,
                 remote_name=self.remote_name,
@@ -4825,7 +4832,7 @@ class MainWindow(QMainWindow):
         self.google_account_combo.clear()
         kind_names = {"personal": "Личный", "workspace": "Workspace", "team": "Команда"}
         for account in accounts:
-            email = account.email or "почта не определена"
+            email = account.email or "почта OAuth2 не подтверждена"
             account_type = kind_names.get(account.kind, "Google")
             label = account.label if account.label and account.label != account.email else "Google Drive"
             self.google_account_combo.addItem(
@@ -4833,7 +4840,7 @@ class MainWindow(QMainWindow):
             )
             self.google_account_combo.setItemData(
                 self.google_account_combo.count() - 1,
-                f"Почта: {email}\nНазвание: {label}\nТип: {account_type}",
+                f"OAuth2 подключён к: {email}\nНазвание: {label}\nТип: {account_type}",
                 Qt.ItemDataRole.ToolTipRole,
             )
         index = self.google_account_combo.findData(selected)
@@ -4845,16 +4852,20 @@ class MainWindow(QMainWindow):
         connected = bool(selected and google_drive_connected(remote_name=selected))
         active = next((account for account in accounts if account.remote_name == selected), None)
         self.google_drive_status.setText(
-            f"● {active.email or active.label}" if connected and active else "Не подключён"
+            f"● OAuth2: {active.email}"
+            if connected and active and active.email
+            else "OAuth2: почта не подтверждена" if connected else "Не подключён"
         )
         if active:
             account_type = kind_names.get(active.kind, "Google")
             self.google_account_identity.setText(
-                f"Почта: {active.email or 'не определена'}  ·  "
+                f"OAuth2 подключён к: {active.email}  ·  подтверждено Google  ·  "
                 f"Название: {active.label}  ·  Тип: {account_type}"
+                if active.email
+                else "OAuth2: почта не подтверждена — переподключите выбранный аккаунт"
             )
         else:
-            self.google_account_identity.setText("Почта: не определена")
+            self.google_account_identity.setText("OAuth2: аккаунт не подключён")
         self.google_drive_status.setProperty("ready", connected)
         self.google_drive_status.style().unpolish(self.google_drive_status)
         self.google_drive_status.style().polish(self.google_drive_status)
@@ -4954,10 +4965,18 @@ class MainWindow(QMainWindow):
         self.settings.sync()
         self._shared_drive_ids_cache.pop(remote_name, None)
         self.settings.remove("google_shared_drive_id")
-        self.append_log("Google Drive OAuth2: аккаунт подключён напрямую к Neon.\n")
+        account = next(
+            (item for item in google_drive_accounts() if item.remote_name == remote_name),
+            None,
+        )
+        identity = account.email if account else ""
+        self.append_log(
+            f"Google Drive OAuth2: подключён аккаунт {identity or 'с неподтверждённой почтой'}.\n"
+        )
         QMessageBox.information(
             self,
             APP_NAME,
+            f"OAuth2 подключён к: {identity}\n\n"
             "Google Drive подключён к Neon Rclone. Выбранный в Проводнике путь сохранён; "
             "облачный поиск папок не запускается.",
         )
@@ -5271,9 +5290,15 @@ class MainWindow(QMainWindow):
             requested = min(MAX_CONCURRENT_DOWNLOADS, max(1, self.concurrency_spin.value()))
         else:
             requested = min(MAX_CONCURRENT_DOWNLOADS, max(1, self.total_items))
-        # Queue concurrency is a user choice. Rclone already protects API calls
-        # with its own pacer and retries, so Neon must not impose a hidden four-file
-        # ceiling that can leave a fast connection underused.
+        cloud_route = is_rclone_remote_path(str(self.active_destination or "")) or any(
+            is_rclone_remote_path(source) for source in self.tasks
+        )
+        if cloud_route:
+            # Several independent Rclone processes do not share one Drive pacer.
+            # They can all reach 100% bytes and then contend forever while Google
+            # finalizes the uploads. One process at a time still has every stream
+            # and chunk from the selected profile, then advances the whole queue.
+            return 1
         return requested
 
     def effective_directory_threads(self) -> int:
@@ -6238,13 +6263,20 @@ class MainWindow(QMainWindow):
             if selected_profile == "turbo" and direction == "download"
             else "выключен"
         )
-        self.footer_info.setText(mode_names.get(selected_mode, "Последовательно"))
+        effective_parallel = self.max_concurrent_downloads()
+        effective_mode = mode_names.get(selected_mode, "Последовательно")
+        if effective_parallel == 1 and (
+            is_rclone_remote_path(str(destination))
+            or any(is_rclone_remote_path(source) for source in items)
+        ):
+            effective_mode = "Google Drive · надёжно по очереди"
+        self.footer_info.setText(effective_mode)
         self.speed.setText("ИЗМЕРЕНИЕ…")
         self.eta.setText("ИЗМЕРЕНИЕ…")
         self.metrics_timer.start()
         self.rebuild_task_rows(destination)
         self.refresh_files_overview()
-        mode = mode_names.get(selected_mode, "Последовательно").lower()
+        mode = effective_mode.lower()
         rclone_options = self.selected_rclone_options()
         self.append_log(
             f"{APP_NAME}\nСеанс: {datetime.now():%Y-%m-%d %H:%M:%S}\n"
@@ -6253,7 +6285,7 @@ class MainWindow(QMainWindow):
             f"Операция: {operation.lower()}\n"
             f"Маршрут: {route_description}\n"
             f"{preflight_summary}\n"
-            f"Режим: {mode}\nПараллельных задач: {self.max_concurrent_downloads()}\n"
+            f"Режим: {mode}\nПараллельных задач: {effective_parallel}\n"
             "Ограничение скорости Neon: отсутствует\n"
             f"Проверка источника: обязательная · стабильность {SOURCE_STABLE_SECONDS:.0f} сек.\n"
             f"Профиль: {profile_name}\nПотоков /MT на папку: {mt_status}\n"
@@ -6476,7 +6508,9 @@ class MainWindow(QMainWindow):
         measured = min(int(item_bytes), task.size) if task.size else int(item_bytes)
         task.downloaded = max(task.downloaded, measured)
         if isinstance(self.workers.get(source), RcloneDownloader):
-            if measured:
+            if task.size and measured >= task.size:
+                task.status = "ПОДТВЕРЖДЕНИЕ GOOGLE…"
+            elif measured:
                 task.status = "ВЫГРУЗКА" if self.active_transfer == "upload" else "ЗАГРУЗКА"
             else:
                 task.status = "ПОДГОТОВКА / ПРОВЕРКА"
@@ -6496,7 +6530,11 @@ class MainWindow(QMainWindow):
 
     def update_overall_progress(self, current_percent: float = 0.0) -> None:
         if self.total_bytes:
-            overall = min(1.0, self.measured_done_bytes / self.total_bytes)
+            byte_progress = min(1.0, self.measured_done_bytes / self.total_bytes)
+            # Reserve the final one percent for successful process completion.
+            # Sending every byte is not the same as Google accepting every file.
+            completion_progress = self.completed_items / max(1, self.total_items)
+            overall = byte_progress * 0.99 + completion_progress * 0.01
         else:
             overall = sum(task.fraction for task in self.tasks.values()) / max(1, self.total_items)
         self.progress.set_progress(round(overall * 1000))

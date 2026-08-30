@@ -46,14 +46,14 @@ class Beta10Tests(unittest.TestCase):
             config,
             remote_name=GOOGLE_DRIVE_REMOTE,
             kind="personal",
-            identity={"email": "personal@example.com"},
+            identity={"email": "personal.user@gmail.com"},
         )
         store_google_drive_token(
             token,
             config,
             remote_name="NeonGoogleDrive_work",
             kind="workspace",
-            identity={"email": "work@example.com"},
+            identity={"email": "work.user@company.com"},
         )
         window = self.window()
         window.refresh_google_drive_status()

@@ -25,6 +25,22 @@ class GoogleDriveAccount:
     kind: str = "personal"
     email: str = ""
     display_name: str = ""
+    identity_verified: bool = False
+
+
+def verified_google_email(value: object) -> str:
+    """Return a usable Google identity email and reject test placeholders."""
+    email = str(value or "").strip()
+    if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", email):
+        return ""
+    domain = email.rsplit("@", 1)[1].lower().rstrip(".")
+    if domain in {
+        "example.com", "example.net", "example.org", "example.invalid", "localhost"
+    }:
+        return ""
+    if domain.endswith((".example", ".invalid", ".test", ".localhost")):
+        return ""
+    return email
 
 
 def google_drive_root(remote_name: str = GOOGLE_DRIVE_REMOTE) -> str:
@@ -112,13 +128,18 @@ def store_google_drive_token(
     )
     profile = identity or {}
     account_kind = kind if kind in ACCOUNT_KINDS else "personal"
-    email = str(profile.get("email", "")).strip()
+    email = verified_google_email(profile.get("email", ""))
     display_name = str(profile.get("display_name", "")).strip()
     resolved_label = label.strip() or email or display_name or "Google Drive"
     config.set(remote_name, "neon_label", resolved_label)
     config.set(remote_name, "neon_kind", account_kind)
     if email:
         config.set(remote_name, "neon_email", email)
+        config.set(remote_name, "neon_identity_verified", "true")
+    else:
+        # Never leave a stale or test address attached to a newly authorized token.
+        config.remove_option(remote_name, "neon_email")
+        config.set(remote_name, "neon_identity_verified", "false")
     if display_name:
         config.set(remote_name, "neon_display_name", display_name)
     temporary = path.with_suffix(path.suffix + ".download")
@@ -147,9 +168,11 @@ def google_drive_accounts(config_path: Path | None = None) -> list[GoogleDriveAc
             continue
         if config.get(section, "type", fallback="") != "drive" or not isinstance(token, dict) or not token.get("access_token"):
             continue
-        email = config.get(section, "neon_email", fallback="").strip()
+        email = verified_google_email(config.get(section, "neon_email", fallback=""))
         display_name = config.get(section, "neon_display_name", fallback="").strip()
         label = config.get(section, "neon_label", fallback="").strip()
+        if "@" in label and not verified_google_email(label):
+            label = ""
         if not label:
             label = email or display_name or ("Основной Google Drive" if section == GOOGLE_DRIVE_REMOTE else section)
         kind = config.get(section, "neon_kind", fallback="personal")
@@ -160,6 +183,9 @@ def google_drive_accounts(config_path: Path | None = None) -> list[GoogleDriveAc
                 kind if kind in ACCOUNT_KINDS else "personal",
                 email,
                 display_name,
+                bool(email) and config.getboolean(
+                    section, "neon_identity_verified", fallback=True
+                ),
             )
         )
     return accounts
@@ -214,6 +240,6 @@ def fetch_google_drive_identity(token: dict[str, object]) -> dict[str, str]:
     if not isinstance(user, dict):
         return {}
     return {
-        "email": str(user.get("emailAddress", "")).strip(),
+        "email": verified_google_email(user.get("emailAddress", "")),
         "display_name": str(user.get("displayName", "")).strip(),
     }
