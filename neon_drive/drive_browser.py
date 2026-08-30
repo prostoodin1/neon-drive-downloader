@@ -40,6 +40,33 @@ class SharedDriveAccessError(ValueError):
         )
 
 
+class GoogleDriveAuthError(RuntimeError):
+    """The selected managed Drive remote needs a fresh OAuth grant."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            "Срок доступа выбранного Google-аккаунта истёк или Google отозвал его. "
+            "Переподключите этот аккаунт к Neon Drive."
+        )
+
+
+def is_google_drive_auth_error(message: str) -> bool:
+    """Recognize Rclone/Google authentication failures without exposing stderr."""
+    lowered = message.casefold()
+    markers = (
+        "invalid authentication credentials",
+        "invalid credentials",
+        "reason: autherror",
+        '"reason": "autherror"',
+        "oauth 2 access token",
+        "invalid_grant",
+        "token has been expired or revoked",
+    )
+    return any(marker in lowered for marker in markers) or (
+        "error 401" in lowered and "googleapi" in lowered
+    )
+
+
 @dataclass(frozen=True)
 class ExplorerDriveTarget:
     drive_id: str
@@ -241,6 +268,8 @@ class DriveClient:
                 raise RuntimeError("Выбор папки отменён.")
             if process.returncode:
                 message = stderr.decode("utf-8", errors="replace")
+                if is_google_drive_auth_error(message):
+                    raise GoogleDriveAuthError()
                 if "rateLimitExceeded" in message or "Quota exceeded" in message:
                     raise RuntimeError(
                         "Google временно ограничил запросы Rclone. Путь из Проводника сохранён; "

@@ -30,6 +30,8 @@ with tempfile.TemporaryDirectory() as temporary:
     window.auto_health_timer.stop()
     window.resize(1100, 740)
     window.theme_combo.setCurrentIndex(window.theme_combo.findData("google_drive_dark"))
+    # Public screenshots must never expose the local Windows account name.
+    window.transfer_panels["download"].destination.setText("C:/Downloads")
     window.show()
     output = root / "docs/images"
     output.mkdir(parents=True, exist_ok=True)

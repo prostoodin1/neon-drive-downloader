@@ -1,5 +1,17 @@
 # Changelog
 
+## 5.6.0-beta.4
+
+- Detect Google Drive `401 Invalid Credentials` separately from folder/path errors.
+  Neon now keeps the Explorer/Finder path, identifies the selected account, and
+  offers a one-click OAuth reconnect instead of displaying raw Rclone diagnostics.
+- Resume the pending transfer automatically after the selected account is
+  successfully reconnected and clear stale Shared Drive ID caches before retrying.
+- Rebuild the public main-screen images with the anonymous `C:/Downloads` path so
+  the local Windows user name is never published.
+- Reflow source and transfer actions into responsive two-row groups so every label,
+  including Full stop, remains readable in compact and normal window sizes.
+
 ## 5.6.0-beta.3
 
 - Add a permanently visible Full stop action that cancels the pending queue and

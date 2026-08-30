@@ -90,6 +90,7 @@ from .transfer_direction import detect_direction, location_label
 from .drive_browser import (
     DriveClient,
     DriveFolderDialog,
+    GoogleDriveAuthError,
     SharedDriveAccessError,
     explorer_shared_drive_target,
     is_managed_drive_path,
@@ -1979,18 +1980,16 @@ class MainWindow(QMainWindow):
         sources = QPlainTextEdit()
         sources.setPlaceholderText("Выберите файлы или папку через Проводник…")
         sources.setFixedHeight(58)
-        source_buttons = QHBoxLayout()
+        source_buttons = QGridLayout()
         source_buttons.setContentsMargins(0, 0, 0, 0)
         choose_files_button = QPushButton("Выбрать файлы")
         choose_files_button.setProperty("colorRole", "download")
-        choose_files_button.setMaximumWidth(150)
         choose_files_button.setToolTip("Выбрать один или несколько файлов через Проводник")
         choose_files_button.clicked.connect(
             lambda _checked=False, selected=direction: self.choose_files_for(selected)
         )
         choose_folder_button = QPushButton("Добавить папку")
         choose_folder_button.setProperty("colorRole", "folder")
-        choose_folder_button.setMaximumWidth(145)
         choose_folder_button.setToolTip(
             "Добавить целую папку или корень подключённого диска в очередь"
         )
@@ -2008,10 +2007,12 @@ class MainWindow(QMainWindow):
             lambda _checked=False, selected=direction: self.choose_single_file_for(selected)
         )
         choose_files_button.setText("Добавить файлы")
-        source_buttons.addWidget(choose_file_button)
-        source_buttons.addWidget(choose_files_button)
-        source_buttons.addWidget(choose_folder_button)
-        source_buttons.addWidget(clear_button)
+        source_buttons.addWidget(choose_file_button, 0, 0)
+        source_buttons.addWidget(choose_files_button, 0, 1, 1, 2)
+        source_buttons.addWidget(choose_folder_button, 1, 0, 1, 2)
+        source_buttons.addWidget(clear_button, 1, 2)
+        source_buttons.setColumnStretch(0, 1)
+        source_buttons.setColumnStretch(1, 1)
 
         destination_row = QHBoxLayout()
         destination = QLineEdit()
@@ -2083,8 +2084,9 @@ class MainWindow(QMainWindow):
         start_button.clicked.connect(
             lambda _checked=False, selected=direction: self.start_or_resume_transfer(selected)
         )
-        transfer_actions = QHBoxLayout()
-        transfer_actions.addWidget(start_button, 1)
+        transfer_actions = QGridLayout()
+        transfer_actions.setContentsMargins(0, 0, 0, 0)
+        transfer_actions.addWidget(start_button, 0, 0, 1, 2)
         visible_stop = QPushButton("Остановить")
         visible_stop.setProperty("colorRole", "danger")
         visible_stop.setToolTip(
@@ -2092,7 +2094,7 @@ class MainWindow(QMainWindow):
         )
         visible_stop.setEnabled(False)
         visible_stop.clicked.connect(self.toggle_resumable_stop)
-        transfer_actions.addWidget(visible_stop)
+        transfer_actions.addWidget(visible_stop, 1, 0)
         hard_stop = QPushButton("Полностью остановить")
         hard_stop.setProperty("colorRole", "danger")
         hard_stop.setToolTip(
@@ -2100,7 +2102,9 @@ class MainWindow(QMainWindow):
         )
         hard_stop.setEnabled(False)
         hard_stop.clicked.connect(self.stop_now)
-        transfer_actions.addWidget(hard_stop)
+        transfer_actions.addWidget(hard_stop, 1, 1)
+        transfer_actions.setColumnStretch(0, 1)
+        transfer_actions.setColumnStretch(1, 1)
         path_grid.addLayout(transfer_actions, 2, 2)
         path_grid.setColumnStretch(0, 5)
         path_grid.setColumnStretch(2, 5)
@@ -5540,6 +5544,44 @@ class MainWindow(QMainWindow):
             value, shared_ids, remote_name=remote_name
         )
 
+    def offer_google_reconnect(
+        self,
+        direction: str,
+        explorer_path: str,
+        *,
+        preserve_cloud_destination: bool,
+    ) -> None:
+        """Offer a fresh OAuth grant while preserving the user's selected paths."""
+        remote_name = self.active_google_remote()
+        account = next(
+            (item for item in google_drive_accounts() if item.remote_name == remote_name),
+            None,
+        )
+        identity = account.email if account and account.email else (
+            account.label if account else "выбранный Google-аккаунт"
+        )
+        prompt = QMessageBox(self)
+        prompt.setIcon(QMessageBox.Icon.Warning)
+        prompt.setWindowTitle(APP_NAME)
+        prompt.setText("Google Drive отклонил сохранённый доступ OAuth2.")
+        prompt.setInformativeText(
+            f"Аккаунт: {identity}\n\n"
+            "Путь в Проводнике сохранён. Переподключите этот аккаунт; после "
+            "подтверждения Neon автоматически повторит передачу."
+        )
+        reconnect = prompt.addButton(
+            "Переподключить аккаунт", QMessageBox.ButtonRole.AcceptRole
+        )
+        prompt.addButton("Отмена", QMessageBox.ButtonRole.RejectRole)
+        prompt.exec()
+        if prompt.clickedButton() != reconnect:
+            return
+        self._shared_drive_ids_cache.pop(remote_name, None)
+        if preserve_cloud_destination:
+            self._cloud_picker_request = (direction, explorer_path)
+        self._start_after_google_oauth = direction
+        self.start_google_drive_oauth()
+
     def choose_destination(self) -> bool:
         return self.choose_destination_for("download")
 
@@ -5920,6 +5962,13 @@ class MainWindow(QMainWindow):
                     else:
                         self.source_directory_flags[item] = Path(item).is_dir()
                         converted_items.append(item)
+            except GoogleDriveAuthError:
+                self.offer_google_reconnect(
+                    direction,
+                    explorer_destination_text,
+                    preserve_cloud_destination=False,
+                )
+                return
             except (SharedDriveAccessError, RuntimeError, ValueError) as exc:
                 QMessageBox.critical(
                     self,
@@ -5945,6 +5994,13 @@ class MainWindow(QMainWindow):
                 destination_text = self.resolve_explorer_google_destination(
                     explorer_destination_text
                 )
+            except GoogleDriveAuthError:
+                self.offer_google_reconnect(
+                    direction,
+                    explorer_destination_text,
+                    preserve_cloud_destination=True,
+                )
+                return
             except SharedDriveAccessError as exc:
                 prompt = QMessageBox(self)
                 prompt.setIcon(QMessageBox.Icon.Warning)
