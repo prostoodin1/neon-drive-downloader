@@ -115,17 +115,22 @@ class Beta4Tests(unittest.TestCase):
             panel.hard_stop_button,
         ):
             self.assertGreater(button.width(), 100, button.text())
-        self.assertFalse(
-            panel.choose_file_button.geometry().intersects(
-                panel.choose_folder_button.geometry()
-            )
+        source_file_position = panel.source_actions_layout.getItemPosition(
+            panel.source_actions_layout.indexOf(panel.choose_file_button)
         )
-        self.assertFalse(
-            panel.start_button.geometry().intersects(
-                panel.hard_stop_button.geometry()
-            )
+        source_folder_position = panel.source_actions_layout.getItemPosition(
+            panel.source_actions_layout.indexOf(panel.choose_folder_button)
         )
-        self.assertGreater(panel.hard_stop_button.width(), 150)
+        start_position = panel.transfer_actions_layout.getItemPosition(
+            panel.transfer_actions_layout.indexOf(panel.start_button)
+        )
+        hard_stop_position = panel.transfer_actions_layout.getItemPosition(
+            panel.transfer_actions_layout.indexOf(panel.hard_stop_button)
+        )
+        self.assertEqual(source_file_position[0], 0)
+        self.assertEqual(source_folder_position[0], 1)
+        self.assertEqual(start_position[0], 0)
+        self.assertEqual(hard_stop_position[0], 1)
 
 
 if __name__ == "__main__":

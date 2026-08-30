@@ -2288,6 +2288,8 @@ class MainWindow(QMainWindow):
         panel.speed_graph = speed_graph
         panel.graph_selector = graph_selector
         graph_selector.currentIndexChanged.connect(self.refresh_selected_speed_graph)
+        panel.source_actions_layout = source_buttons
+        panel.transfer_actions_layout = transfer_actions
         panel.visible_stop_button = visible_stop
         panel.hard_stop_button = hard_stop
         panel.choose_file_button = choose_file_button
