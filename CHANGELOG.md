@@ -1,5 +1,16 @@
 # Changelog
 
+## 5.6.0-beta.6
+
+- Restore real simultaneous Google Drive jobs when `Multiple at once` / `All` is
+  selected. Sequential mode remains available and continues to run exactly one item.
+- Share a bounded Google API request budget across active Rclone processes. This
+  smooths metadata/finalization calls without adding `--bwlimit` or capping file traffic.
+- Add a one-time welcome card for a clean installation and a one-time What's New card
+  after every version upgrade. The installed version is remembered before the dialog opens.
+- Promote whole folders to a first-class source: `Add folders` supports extended
+  multi-selection and queues every chosen directory or drive root without flattening it.
+
 ## 5.6.0-beta.5
 
 - Show the exact Google-returned email as `OAuth2 connected to` for every account.

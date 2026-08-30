@@ -2,20 +2,20 @@
 
 ### Ваши файлы. Понятная передача. Windows + macOS.
 
-![Version](https://img.shields.io/badge/version-5.6.0--beta.5-4285F4)
+![Version](https://img.shields.io/badge/version-5.6.0--beta.6-4285F4)
 ![Windows](https://img.shields.io/badge/Windows-10%20%2F%2011-34A853)
 ![macOS](https://img.shields.io/badge/macOS-12%2B-FBBC04)
 ![Channel](https://img.shields.io/badge/channel-beta-EA4335)
 
-## Скачать 5.6.0 Beta 5
+## Скачать 5.6.0 Beta 6
 
 | Система | Приложение со встроенным Rclone | Менеджер версий |
 | :--- | :--- | :--- |
-| 🪟 **Windows 10 / 11 · x64** | [⬇ Скачать Setup.exe](https://github.com/prostoodin1/neon-drive-downloader/releases/download/v5.6.0-beta.5/NeonDrive-Setup.exe) | [⬇ Скачать Installer.exe](https://github.com/prostoodin1/neon-drive-downloader/releases/download/v5.6.0-beta.5/NeonDriveInstaller.exe) |
-| 🍎 **Mac · Apple Silicon** | [⬇ Скачать приложение ARM64.dmg](https://github.com/prostoodin1/neon-drive-downloader/releases/download/v5.6.0-beta.5/NeonDrive-macOS-arm64.dmg) | [⬇ Скачать установщик ARM64.dmg](https://github.com/prostoodin1/neon-drive-downloader/releases/download/v5.6.0-beta.5/NeonDriveInstaller-macOS-arm64.dmg) |
-| 💻 **Mac · Intel** | [⬇ Скачать приложение x64.dmg](https://github.com/prostoodin1/neon-drive-downloader/releases/download/v5.6.0-beta.5/NeonDrive-macOS-x64.dmg) | [⬇ Скачать установщик x64.dmg](https://github.com/prostoodin1/neon-drive-downloader/releases/download/v5.6.0-beta.5/NeonDriveInstaller-macOS-x64.dmg) |
+| 🪟 **Windows 10 / 11 · x64** | [⬇ Скачать Setup.exe](https://github.com/prostoodin1/neon-drive-downloader/releases/download/v5.6.0-beta.6/NeonDrive-Setup.exe) | [⬇ Скачать Installer.exe](https://github.com/prostoodin1/neon-drive-downloader/releases/download/v5.6.0-beta.6/NeonDriveInstaller.exe) |
+| 🍎 **Mac · Apple Silicon** | [⬇ Скачать приложение ARM64.dmg](https://github.com/prostoodin1/neon-drive-downloader/releases/download/v5.6.0-beta.6/NeonDrive-macOS-arm64.dmg) | [⬇ Скачать установщик ARM64.dmg](https://github.com/prostoodin1/neon-drive-downloader/releases/download/v5.6.0-beta.6/NeonDriveInstaller-macOS-arm64.dmg) |
+| 💻 **Mac · Intel** | [⬇ Скачать приложение x64.dmg](https://github.com/prostoodin1/neon-drive-downloader/releases/download/v5.6.0-beta.6/NeonDrive-macOS-x64.dmg) | [⬇ Скачать установщик x64.dmg](https://github.com/prostoodin1/neon-drive-downloader/releases/download/v5.6.0-beta.6/NeonDriveInstaller-macOS-x64.dmg) |
 
-**Для Windows:** [установить Neon Drive](https://github.com/prostoodin1/neon-drive-downloader/releases/download/v5.6.0-beta.5/NeonDrive-Setup.exe) · [менеджер новых и старых версий](https://github.com/prostoodin1/neon-drive-downloader/releases/download/v5.6.0-beta.5/NeonDriveInstaller.exe).
+**Для Windows:** [установить Neon Drive](https://github.com/prostoodin1/neon-drive-downloader/releases/download/v5.6.0-beta.6/NeonDrive-Setup.exe) · [менеджер новых и старых версий](https://github.com/prostoodin1/neon-drive-downloader/releases/download/v5.6.0-beta.6/NeonDriveInstaller.exe).
 
 [Все версии и изменения →](https://github.com/prostoodin1/neon-drive-downloader/releases)
 · [Сообщить об ошибке →](https://github.com/prostoodin1/neon-drive-downloader/issues)
@@ -27,16 +27,26 @@ Git и аккаунт GitHub **не нужны**. Публичных ZIP/portabl
 
 Neon Drive — независимое приложение, не продукт Google.
 
-![Neon Drive 5.6 Beta 5 — настоящие виджеты приложения](docs/images/beta8-dark.png)
+![Neon Drive 5.6 Beta 6 — настоящие виджеты приложения](docs/images/beta8-dark.png)
 
-## Новое в 5.6.0 Beta 5
+## Новое в 5.6.0 Beta 6
+
+- **Несколько файлов действительно одновременно:** режим «Несколько одновременно»
+  снова запускает выбранное число Rclone-процессов. Последовательный режим сохранён.
+- **Стабильнее без ограничения скорости:** Neon распределяет частоту служебных
+  Google API-запросов между процессами, но не использует `--bwlimit`.
+- **Первый запуск и обновления:** новый пользователь один раз увидит быстрый старт,
+  а после каждой новой версии один раз показывается список изменений.
+- **Несколько целых папок:** кнопка «Добавить папки» позволяет выбрать несколько
+  каталогов или корней дисков; каждый полностью добавляется в общую очередь.
+
+### Также включено из Beta 5
 
 - **Понятная почта OAuth2:** в настройках дословно написано
   `OAuth2 подключён к: имя@gmail.com`. Адрес берётся у Google после входа;
   тестовые значения вроде `team@example.com` больше не считаются аккаунтом.
-- **Все выбранные файлы доходят до Google Drive:** прямые облачные передачи идут
-  через одну надёжную очередь. После подтверждения первого файла автоматически
-  запускается второй, затем третий — без конкурирующих процессов финализации.
+- **Все выбранные файлы учитываются:** очередь хранит каждый выбранный объект,
+  а завершение засчитывается только после подтверждения соответствующего процесса.
 - **Честные 100%:** отправка последнего байта показывает этап подтверждения Google.
   Общий индикатор станет 100% только после успешного завершения всех файлов.
 
@@ -59,7 +69,7 @@ Neon Drive — независимое приложение, не продукт 
 - **Проверка назначения:** совпадающие локальные файлы пропускаются до запуска,
   отличающиеся требуют подтверждения, а существующие папки безопасно объединяются.
   В Google Drive каждый объект перед выгрузкой сверяет Rclone.
-- **Целые папки и свои диски:** кнопка «Добавить папку» работает для загрузки и
+- **Целые папки и свои диски:** кнопка «Добавить папки» работает для загрузки и
   выгрузки. Можно копировать папки между физическими, внешними и сетевыми дисками,
   не используя Google Drive.
 - **Очистка «Передач»:** новая кнопка удаляет накопившиеся списки, строки, терминалы
@@ -70,9 +80,9 @@ Neon Drive — независимое приложение, не продукт 
 - **Сразу в Google Drive:** папка на виртуальном диске теперь автоматически
   передаётся прямому Neon Rclone. Промежуточного локального копирования и ожидания
   второй синхронизации клиента Google Drive больше нет.
-- **Без потолка 56 МБ/с:** Neon не передаёт Rclone `--bwlimit`. Один активный
-  облачный файл получает весь доступный канал, а следующие файлы надёжно ждут его
-  серверного подтверждения; реальная скорость зависит от сети, диска и Google.
+- **Без потолка 56 МБ/с:** Neon не передаёт Rclone `--bwlimit`; выбранные
+  параллельные процессы делят доступный канал. Реальная скорость зависит от сети,
+  диска, количества одновременных файлов и Google.
 - **Быстрее большие файлы:** чанк Google Drive теперь связан с профилем скорости:
   64 МиБ, 128 МиБ, 256 МиБ или 1 ГиБ. Новая установка начинает с быстрого профиля.
 - **Ручной вариант сохранён:** если в настройках явно выбрано обычное копирование,
@@ -83,8 +93,7 @@ Neon Drive — независимое приложение, не продукт 
 - **Автоскачивание из Google Drive:** выбранные в Проводнике файлы Google Drive
   автоматически преобразуются в прямые источники Neon Rclone, а назначение остаётся локальным.
 - **Несколько файлов:** в «Шаблонах» можно выбрать очередь или одновременную передачу.
-  Локальные движки поддерживают до десяти задач, а прямой Google Drive автоматически
-  использует устойчивую последовательную очередь без потери выбранных файлов.
+  Локальные движки и прямой Google Drive поддерживают до десяти выбранных задач.
 - **Продолжение с синей кнопки:** во время сохранённой паузы основная кнопка становится
   синей «Продолжить» и возобновляет те же процессы. Robocopy `/Z` включён во всех шаблонах.
 - **Живые графики:** красный означает низкую скорость, жёлтый — среднюю, зелёный —

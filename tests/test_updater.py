@@ -36,14 +36,14 @@ class UpdaterTests(unittest.TestCase):
     def test_beta_update_check_includes_newer_prereleases(self) -> None:
         releases = [
             release_payload("v5.5.0-beta.4", [updater.SETUP_ASSET_NAME], prerelease=True),
-            release_payload("v5.6.0-beta.6", [updater.SETUP_ASSET_NAME], prerelease=True),
+            release_payload("v5.6.0-beta.7", [updater.SETUP_ASSET_NAME], prerelease=True),
             release_payload("v5.4.0", [updater.SETUP_ASSET_NAME]),
         ]
         with patch.object(updater, "_release_data", return_value=(releases, "public")) as lookup:
             release = updater.latest_release()
 
         lookup.assert_called_once_with(latest=False)
-        self.assertEqual(release["version"], "5.6.0-beta.6")
+        self.assertEqual(release["version"], "5.6.0-beta.7")
         self.assertTrue(release["available"])
 
     def test_public_release_lookup_never_requires_github_login(self) -> None:

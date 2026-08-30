@@ -48,6 +48,7 @@ from PySide6.QtGui import (
     QTextCursor,
 )
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QApplication,
     QButtonGroup,
     QCheckBox,
@@ -1395,6 +1396,78 @@ class TransferPanel:
     file_rows: dict[str, FileRow] = field(default_factory=dict)
 
 
+def select_source_folders(parent: QWidget, start: str = "") -> list[str]:
+    """Select one or more source folders with Qt's extended-selection dialog."""
+    dialog = QFileDialog(parent, "Выберите одну или несколько папок", start)
+    dialog.setOption(QFileDialog.Option.DontUseNativeDialog, True)
+    dialog.setOption(QFileDialog.Option.ShowDirsOnly, True)
+    dialog.setFileMode(QFileDialog.FileMode.ExistingFiles)
+    dialog.setAcceptMode(QFileDialog.AcceptMode.AcceptOpen)
+    for view in dialog.findChildren(QAbstractItemView):
+        view.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+    if dialog.exec() != QDialog.DialogCode.Accepted:
+        return []
+    folders: list[str] = []
+    seen: set[str] = set()
+    for selected in dialog.selectedFiles():
+        path = Path(selected)
+        if not path.is_dir():
+            continue
+        normalized = os.path.normcase(os.path.normpath(str(path)))
+        if normalized not in seen:
+            folders.append(str(path))
+            seen.add(normalized)
+    return folders
+
+
+class ReleaseWelcomeDialog(QDialog):
+    """One-time welcome / what's-new card for the installed application version."""
+
+    def __init__(self, first_launch: bool, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Добро пожаловать в Neon Drive" if first_launch else "Что нового")
+        self.setModal(True)
+        self.setMinimumWidth(590)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(26, 24, 26, 22)
+        layout.setSpacing(13)
+        title = QLabel(
+            "Добро пожаловать в Neon Drive" if first_launch else f"Neon Drive {__version__}"
+        )
+        title.setObjectName("dashboardTitle")
+        subtitle = QLabel(
+            "Быстрый старт" if first_launch else "Изменения этой версии показываются только один раз"
+        )
+        subtitle.setObjectName("dashboardSubtitle")
+        layout.addWidget(title)
+        layout.addWidget(subtitle)
+        if first_launch:
+            guide = QLabel(
+                "1. Нажмите «Добавить файлы» или «Добавить папки».\n"
+                "2. Выберите папку назначения. Для Google Drive подключите OAuth2.\n"
+                "3. Выберите профиль и нажмите «Начать передачу»."
+            )
+            guide.setWordWrap(True)
+            guide.setObjectName("card")
+            layout.addWidget(guide)
+        changes_title = QLabel("Что нового в Beta 6")
+        changes_title.setObjectName("transferTitle")
+        changes = QLabel(
+            "• Возвращена настоящая одновременная выгрузка нескольких файлов.\n"
+            "• Google API-запросы распределяются между процессами без ограничения скорости канала.\n"
+            "• Можно выбрать сразу несколько целых папок и передать их одной очередью.\n"
+            "• Этот экран запоминается отдельно для каждой версии и больше не мешает при запуске."
+        )
+        changes.setWordWrap(True)
+        layout.addWidget(changes_title)
+        layout.addWidget(changes)
+        close_button = QPushButton("Начать работу" if first_launch else "Понятно")
+        close_button.setObjectName("primaryButton")
+        close_button.setMinimumHeight(42)
+        close_button.clicked.connect(self.accept)
+        layout.addWidget(close_button)
+
+
 class AddonInstallThread(QThread):
     succeeded = Signal(str)
     failed = Signal(str)
@@ -1550,6 +1623,7 @@ class MainWindow(QMainWindow):
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
         # Keep the beta.12 settings namespace so upgrades retain every preference.
         self.settings = create_settings(SETTINGS_APP_NAME)
+        self.had_existing_profile = bool(self.settings.allKeys())
         self.transfer_stats = TransferStats(self.settings)
         self.queue: deque[str] = deque()
         self.workers: dict[str, Downloader | RcloneDownloader | TurboFileDownloader] = {}
@@ -1719,7 +1793,7 @@ class MainWindow(QMainWindow):
         header_copy.setSpacing(1)
         self.dashboard_title = QLabel("Главная", objectName="dashboardTitle")
         self.dashboard_subtitle = QLabel(
-            "Одна очередь, один процесс Rclone и полный контроль скорости",
+            "Общая очередь, выбранная параллельность Rclone и полный контроль скорости",
             objectName="dashboardSubtitle",
         )
         header_copy.addWidget(self.dashboard_title)
@@ -1834,7 +1908,7 @@ class MainWindow(QMainWindow):
         metadata = {
             self.home_page: (
                 "Главная",
-                "Одна очередь, один процесс Rclone и полный контроль скорости",
+                "Общая очередь, выбранная параллельность Rclone и полный контроль скорости",
             ),
             self.files_page: ("Передачи", "Все файлы, направления, скорость и статус"),
             self.profiles_page: (
@@ -1985,7 +2059,7 @@ class MainWindow(QMainWindow):
         form.addLayout(hero_row)
 
         sources = QPlainTextEdit()
-        sources.setPlaceholderText("Выберите файлы или папку через Проводник…")
+        sources.setPlaceholderText("Добавьте файлы, несколько папок или целый диск…")
         sources.setFixedHeight(58)
         source_buttons = QGridLayout()
         source_buttons.setContentsMargins(0, 0, 0, 0)
@@ -1995,10 +2069,10 @@ class MainWindow(QMainWindow):
         choose_files_button.clicked.connect(
             lambda _checked=False, selected=direction: self.choose_files_for(selected)
         )
-        choose_folder_button = QPushButton("Добавить папку")
+        choose_folder_button = QPushButton("Добавить папки")
         choose_folder_button.setProperty("colorRole", "folder")
         choose_folder_button.setToolTip(
-            "Добавить целую папку или корень подключённого диска в очередь"
+            "Выбрать одну или несколько целых папок либо корень подключённого диска"
         )
         choose_folder_button.clicked.connect(
             lambda _checked=False, selected=direction: self.choose_source_folder_for(selected)
@@ -2909,8 +2983,8 @@ class MainWindow(QMainWindow):
 
         rclone_card, rclone_box = self.settings_section("RCLONE · СКОРОСТЬ И НАДЁЖНОСТЬ")
         rclone_note = QLabel(
-            "Один процесс Rclone может нагружать канал несколькими потоками. Выберите готовый "
-            "профиль или настройте параметры вручную; целостность и безопасная запись сохраняются."
+            "Каждый процесс Rclone использует внутренние потоки, а режим «Несколько одновременно» "
+            "добавляет параллельные файлы. Целостность и безопасная запись сохраняются."
         )
         rclone_note.setObjectName("settingDescription")
         rclone_note.setWordWrap(True)
@@ -5231,6 +5305,7 @@ class MainWindow(QMainWindow):
 
     def selected_rclone_options(self) -> RcloneOptions:
         managed_config = managed_rclone_config_path()
+        active_processes = max(1, self.max_concurrent_downloads())
         return RcloneOptions(
             drive_chunk_size_mib=int(self.drive_chunk_combo.currentData() or 64),
             chunk_size_mib=int(self.rclone_chunk_combo.currentData() or 64),
@@ -5247,6 +5322,9 @@ class MainWindow(QMainWindow):
             checksum=self.rclone_checksum_check.isChecked(),
             local_no_sparse=self.rclone_no_sparse_check.isChecked(),
             config_path=str(managed_config) if managed_config.is_file() else None,
+            # The total API request budget stays bounded across simultaneous
+            # processes. This limits metadata calls, never upload bandwidth.
+            drive_tps_limit=max(2, 24 // active_processes),
         )
 
     def choose_accent_color(self) -> None:
@@ -5293,11 +5371,13 @@ class MainWindow(QMainWindow):
         cloud_route = is_rclone_remote_path(str(self.active_destination or "")) or any(
             is_rclone_remote_path(source) for source in self.tasks
         )
-        if cloud_route:
-            # Several independent Rclone processes do not share one Drive pacer.
-            # They can all reach 100% bytes and then contend forever while Google
-            # finalizes the uploads. One process at a time still has every stream
-            # and chunk from the selected profile, then advances the whole queue.
+        if (
+            cloud_route
+            and hasattr(self, "drive_chunk_combo")
+            and int(self.drive_chunk_combo.currentData() or 64) >= 1024
+        ):
+            # A Drive backend holds one complete upload chunk per process. The
+            # explicit 1 GiB Extreme profile stays single-file to avoid OOM.
             return 1
         return requested
 
@@ -5678,13 +5758,27 @@ class MainWindow(QMainWindow):
 
     def choose_source_folder_for(self, direction: str) -> None:
         key = "last_upload_source_dir" if direction == "upload" else "last_source_dir"
-        start = self.settings.value(key, "")
-        folder = QFileDialog.getExistingDirectory(self, "Выберите папку или диск", start)
-        if folder:
-            self.settings.setValue(key, folder)
-            self._append_sources_for(direction, [folder])
+        start = str(self.settings.value(key, "") or "")
+        folders = select_source_folders(self, start)
+        if folders:
+            self.settings.setValue(key, str(Path(folders[0]).parent))
+            self._append_sources_for(direction, folders)
             if direction == "download":
                 self.maybe_auto_start()
+
+    def show_release_welcome_once(self) -> bool:
+        if "--smoke-test" in sys.argv:
+            return False
+        seen_version = str(self.settings.value("welcome_seen_version", "") or "")
+        if seen_version == __version__:
+            return False
+        first_launch = not bool(seen_version) and not self.had_existing_profile
+        # Persist before opening the modal card: even an interrupted launch must
+        # not show the same version card over and over.
+        self.settings.setValue("welcome_seen_version", __version__)
+        self.settings.sync()
+        ReleaseWelcomeDialog(first_launch, self).exec()
+        return True
 
     def choose_source_folder(self) -> None:
         self.choose_source_folder_for("download")
@@ -7338,4 +7432,6 @@ def main() -> int:
         window.showMaximized()
     else:
         window.show()
+    if "--smoke-test" not in sys.argv:
+        QTimer.singleShot(250, window.show_release_welcome_once)
     return app.exec()

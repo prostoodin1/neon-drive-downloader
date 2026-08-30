@@ -148,7 +148,7 @@ class Beta3Tests(unittest.TestCase):
             self.assertTrue(window.running)
             self.assertTrue(window.tasks[str(source)].is_directory)
             self.assertEqual(Path(window.active_destination), destination)
-            self.assertEqual(panel.choose_folder_button.text(), "Добавить папку")
+            self.assertEqual(panel.choose_folder_button.text(), "Добавить папки")
             fill.assert_called_once_with()
 
     def test_every_google_account_shows_its_email(self) -> None:

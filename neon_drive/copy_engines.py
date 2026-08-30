@@ -28,6 +28,7 @@ class RcloneOptions:
     local_no_preallocate: bool = True
     config_path: str | None = None
     drive_chunk_size_mib: int = 64
+    drive_tps_limit: int = 0
 
 
 def is_rclone_remote_path(value: str | Path) -> bool:
@@ -126,7 +127,10 @@ def rclone_arguments(
     if remote_source or is_rclone_remote_path(destination):
         # Let the Drive pacer smooth API bursts instead of repeatedly hitting
         # quota backoff. This does not cap transfer bandwidth.
-        args.extend(("--drive-pacer-min-sleep=10ms", "--drive-pacer-burst=200"))
+        args.extend(("--drive-pacer-min-sleep=10ms", "--drive-pacer-burst=20"))
+        if int(selected.drive_tps_limit) > 0:
+            tps = max(1, min(50, int(selected.drive_tps_limit)))
+            args.extend((f"--tpslimit={tps}", f"--tpslimit-burst={tps * 2}"))
     if selected.config_path:
         args.append(f"--config={selected.config_path}")
     return args, target

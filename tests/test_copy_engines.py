@@ -75,6 +75,19 @@ class CopyEngineTests(unittest.TestCase):
             self.assertTrue(is_rclone_remote_path("NeonGoogleDrive:"))
             self.assertFalse(is_rclone_remote_path(r"C:\Downloads"))
 
+    def test_parallel_drive_processes_limit_api_calls_not_bandwidth(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir) / "movie.mkv"
+            source.write_bytes(b"neon")
+            args, _ = rclone_arguments(
+                str(source),
+                "NeonGoogleDrive:Projects",
+                RcloneOptions(drive_tps_limit=8),
+            )
+            self.assertIn("--tpslimit=8", args)
+            self.assertIn("--tpslimit-burst=16", args)
+            self.assertNotIn("--bwlimit", " ".join(args))
+
     def test_hybrid_never_assigns_two_engines_to_one_source(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
