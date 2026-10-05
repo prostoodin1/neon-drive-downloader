@@ -1,0 +1,838 @@
+"""Read-only Google Drive browser using the bundled, OAuth-aware Rclone."""
+from __future__ import annotations
+
+import json
+import os
+import re
+import sqlite3
+import subprocess
+import threading
+from dataclasses import dataclass
+from pathlib import Path
+
+from PySide6.QtCore import QThread, Qt, Signal
+from PySide6.QtWidgets import (
+    QAbstractItemView,
+    QDialog,
+    QHBoxLayout,
+    QLabel,
+    QListWidget,
+    QListWidgetItem,
+    QPushButton,
+    QVBoxLayout,
+)
+
+from .google_drive import GOOGLE_DRIVE_REMOTE, google_drive_root, managed_rclone_config_path
+
+
+ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
+MANAGED_PATH = re.compile(
+    r"^(?P<remote>NeonGoogleDrive(?:_[A-Za-z0-9_-]+)?)(?:,(?:(?:team_drive|root_folder_id)=[A-Za-z0-9_-]+|shared_with_me(?:=true)?))*:"
+)
+SHARED_NAMES = {"shared drives", "unidades compartidas", "общие диски", "drives partagés"}
+MY_NAMES = {"my drive", "мой диск", "mi unidad", "mon drive"}
+SHARED_WITH_ME_NAMES = {
+    "shared with me", "доступные мне", "доступно мне", "compartido conmigo", "partagés avec moi"
+}
+
+
+class SharedDriveAccessError(ValueError):
+    """The Drive for desktop account can see a drive that Neon OAuth cannot."""
+
+    def __init__(self, drive_name: str, drive_letter: str = "") -> None:
+        self.drive_name = drive_name
+        self.drive_letter = drive_letter
+        location = f" на диске {drive_letter}" if drive_letter else " в Проводнике"
+        super().__init__(
+            f"Google Drive{location} видит общий диск «{drive_name}», "
+            "но подключённый к Neon OAuth-аккаунт не имеет к нему доступа."
+        )
+
+
+class GoogleDriveAuthError(RuntimeError):
+    """The selected managed Drive remote needs a fresh OAuth grant."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            "Срок доступа выбранного Google-аккаунта истёк или Google отозвал его. "
+            "Переподключите этот аккаунт к Neon Drive."
+        )
+
+
+def is_google_drive_auth_error(message: str) -> bool:
+    """Recognize Rclone/Google authentication failures without exposing stderr."""
+    lowered = message.casefold()
+    markers = (
+        "invalid authentication credentials",
+        "invalid credentials",
+        "reason: autherror",
+        '"reason": "autherror"',
+        "oauth 2 access token",
+        "invalid_grant",
+        "token has been expired or revoked",
+    )
+    return any(marker in lowered for marker in markers) or (
+        "error 401" in lowered and "googleapi" in lowered
+    )
+
+
+@dataclass(frozen=True)
+class ExplorerDriveTarget:
+    drive_id: str
+    folder_id: str
+
+
+def _drivefs_root() -> Path:
+    override = os.environ.get("NEON_DRIVEFS_DIR")
+    if override:
+        return Path(override).expanduser()
+    local = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
+    return local / "Google" / "DriveFS"
+
+
+def explorer_shared_drive_target(value: str) -> ExplorerDriveTarget | None:
+    """Resolve an Explorer folder through Drive for desktop's read-only cache.
+
+    This avoids searching cloud folders by display name.  Drive for desktop
+    already knows the exact Shared Drive and folder IDs for a path the user has
+    selected in Explorer.  Its metadata schema is treated as an optional cache:
+    any missing/changed database simply falls back to the regular Drive API.
+    """
+    parsed = virtual_drive_parts(value)
+    if not parsed or parsed[0] != "shared" or not parsed[1]:
+        return None
+    _kind, drive_name, names = parsed
+    root = _drivefs_root()
+    if not root.is_dir():
+        return None
+    for database in root.glob("*/metadata_sqlite_db"):
+        try:
+            connection = sqlite3.connect(
+                f"file:{database.as_posix()}?mode=ro", uri=True, timeout=1
+            )
+            try:
+                roots = connection.execute(
+                    "SELECT stable_id, id FROM items "
+                    "WHERE local_title = ? AND is_folder = 1 "
+                    "AND team_drive_stable_id = stable_id AND is_tombstone = 0",
+                    (drive_name,),
+                ).fetchall()
+                for stable_id, drive_id in roots:
+                    current_stable_id = int(stable_id)
+                    current_id = str(drive_id)
+                    matched = True
+                    for name in names:
+                        children = connection.execute(
+                            "SELECT i.stable_id, i.id FROM items i "
+                            "JOIN stable_parents p ON p.item_stable_id = i.stable_id "
+                            "WHERE p.parent_stable_id = ? AND i.local_title = ? "
+                            "AND i.is_folder = 1 AND i.is_tombstone = 0",
+                            (current_stable_id, name),
+                        ).fetchall()
+                        if len(children) != 1:
+                            matched = False
+                            break
+                        current_stable_id, current_id = int(children[0][0]), str(children[0][1])
+                    if (
+                        matched
+                        and ID_PATTERN.fullmatch(str(drive_id))
+                        and ID_PATTERN.fullmatch(current_id)
+                    ):
+                        return ExplorerDriveTarget(str(drive_id), current_id)
+            finally:
+                connection.close()
+        except (OSError, sqlite3.Error, TypeError, ValueError):
+            continue
+    return None
+
+
+def is_managed_drive_path(value: str) -> bool:
+    return bool(MANAGED_PATH.match(value.strip()))
+
+
+def virtual_drive_parts(value: str) -> tuple[str, str, list[str]] | None:
+    parts = [part for part in value.replace("\\", "/").split("/") if part]
+    for index, part in enumerate(parts):
+        lowered = part.casefold()
+        if lowered in SHARED_NAMES:
+            remaining = parts[index + 1:]
+            return ("shared", remaining[0], remaining[1:]) if remaining else ("shared", "", [])
+        if lowered in MY_NAMES:
+            return "my", "", parts[index + 1:]
+        if lowered in SHARED_WITH_ME_NAMES:
+            return "shared_with_me", "", parts[index + 1:]
+    return None
+
+
+def managed_options(value: str) -> dict[str, str]:
+    match = MANAGED_PATH.match(value.strip())
+    if not match:
+        return {}
+    options: dict[str, str] = {}
+    for part in match.group(0).rstrip(":").split(",")[1:]:
+        if "=" in part:
+            key, option_value = part.split("=", 1)
+            options[key] = option_value
+        else:
+            options[part] = "true"
+    return options
+
+
+def remote_from_explorer_path(
+    value: str,
+    shared_drive_ids: dict[str, str] | None = None,
+    shared_target: ExplorerDriveTarget | None = None,
+    remote_name: str = GOOGLE_DRIVE_REMOTE,
+) -> str:
+    """Convert a Drive for desktop path without walking its cloud folders."""
+    parsed = virtual_drive_parts(value)
+    if not parsed:
+        raise ValueError("Путь не похож на папку Google Drive из Проводника.")
+    kind, drive_name, names = parsed
+    remote_root = google_drive_root(remote_name)
+    if kind == "my":
+        root = remote_root
+    elif kind == "shared_with_me":
+        root = f"{remote_name},shared_with_me:"
+    else:
+        if shared_target is not None:
+            if not (
+                ID_PATTERN.fullmatch(shared_target.drive_id)
+                and ID_PATTERN.fullmatch(shared_target.folder_id)
+            ):
+                raise ValueError("Google Drive вернул некорректный ID выбранной папки.")
+            return (
+                f"{remote_name},team_drive="
+                f"{shared_target.drive_id},root_folder_id={shared_target.folder_id}:"
+            )
+        identifiers = {name.casefold(): identifier for name, identifier in (shared_drive_ids or {}).items()}
+        drive_id = identifiers.get(drive_name.casefold())
+        if not drive_id or not ID_PATTERN.fullmatch(drive_id):
+            raise ValueError(
+                f"Не удалось сопоставить общий диск «{drive_name}». "
+                "Проверьте подключённый Google-аккаунт и повторите попытку."
+            )
+        root = f"{remote_name},team_drive={drive_id}:"
+    return root + "/".join(names)
+
+
+@dataclass(frozen=True)
+class DriveFolder:
+    name: str
+    folder_id: str
+    drive_id: str = ""
+    label: str = ""
+    shared_with_me: bool = False
+    remote_name: str = GOOGLE_DRIVE_REMOTE
+
+    @property
+    def remote(self) -> str:
+        if not ID_PATTERN.fullmatch(self.folder_id) or (self.drive_id and not ID_PATTERN.fullmatch(self.drive_id)):
+            raise ValueError("Некорректный ID папки Google Drive.")
+        if self.shared_with_me:
+            return f"{self.remote_name},shared_with_me:"
+        options = ([f"team_drive={self.drive_id}"] if self.drive_id else []) + [
+            f"root_folder_id={self.folder_id}"
+        ]
+        return self.remote_name + "," + ",".join(options) + ":"
+
+
+@dataclass(frozen=True)
+class DriveEntry:
+    """One selectable file or directory in the Google Drive browser."""
+
+    name: str
+    identifier: str
+    parent: DriveFolder
+    is_directory: bool
+    size: int = 0
+    modified: str = ""
+
+    @property
+    def label(self) -> str:
+        return self.parent.label + " / " + self.name
+
+    @property
+    def remote(self) -> str:
+        if self.is_directory and ID_PATTERN.fullmatch(self.identifier):
+            return DriveFolder(
+                self.name,
+                self.identifier,
+                self.parent.drive_id,
+                self.label,
+                remote_name=self.parent.remote_name,
+            ).remote
+        return self.parent.remote + self.name
+
+    @property
+    def folder(self) -> DriveFolder | None:
+        if not self.is_directory or not ID_PATTERN.fullmatch(self.identifier):
+            return None
+        return DriveFolder(
+            self.name,
+            self.identifier,
+            self.parent.drive_id,
+            self.label,
+            remote_name=self.parent.remote_name,
+        )
+
+
+class DriveClient:
+    def __init__(self, executable: str, remote_name: str = GOOGLE_DRIVE_REMOTE) -> None:
+        self.executable = executable
+        self.remote_name = remote_name
+        self.remote_root = google_drive_root(remote_name)
+        self.cancelled = threading.Event()
+        self._lock = threading.Lock()
+        self._process: subprocess.Popen | None = None
+
+    def cancel(self) -> None:
+        self.cancelled.set()
+        with self._lock:
+            if self._process is not None and self._process.poll() is None:
+                try:
+                    self._process.terminate()
+                except ProcessLookupError:
+                    pass
+
+    def query(self, arguments: list[str]) -> list[dict]:
+        with self._lock:
+            if self.cancelled.is_set():
+                raise RuntimeError("Выбор папки отменён.")
+            process = subprocess.Popen(
+                [self.executable, *arguments, f"--config={managed_rclone_config_path()}",
+                 "--contimeout=15s", "--timeout=30s", "--retries=1", "--low-level-retries=2"],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            self._process = process
+        try:
+            try:
+                stdout, stderr = process.communicate(timeout=60)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.communicate()
+                raise RuntimeError("Google Drive не ответил за 60 секунд. Проверьте сеть и доступ.")
+            if self.cancelled.is_set():
+                raise RuntimeError("Выбор папки отменён.")
+            if process.returncode:
+                message = stderr.decode("utf-8", errors="replace")
+                if is_google_drive_auth_error(message):
+                    raise GoogleDriveAuthError()
+                if "rateLimitExceeded" in message or "Quota exceeded" in message:
+                    raise RuntimeError(
+                        "Google временно ограничил запросы Rclone. Путь из Проводника сохранён; "
+                        "подождите немного и повторите запуск."
+                    )
+                raise RuntimeError(message[-2000:] or "Не удалось прочитать Google Drive.")
+            result = json.loads(stdout.decode("utf-8"))
+            if not isinstance(result, list):
+                raise ValueError("Google Drive вернул неожиданный список папок.")
+            return result
+        finally:
+            with self._lock:
+                self._process = None
+
+    def roots(self) -> list[DriveFolder]:
+        roots = [
+            DriveFolder("Мой диск", "root", label="Мой диск", remote_name=self.remote_name),
+            DriveFolder("Доступные мне", "root", label="Доступные мне", shared_with_me=True, remote_name=self.remote_name),
+        ]
+        for drive in self.query(["backend", "drives", self.remote_root]):
+            name, identifier = str(drive.get("name", "")), str(drive.get("id", ""))
+            if name and ID_PATTERN.fullmatch(identifier):
+                roots.append(DriveFolder(name, identifier, identifier, "Общие диски / " + name, remote_name=self.remote_name))
+        return roots
+
+    def shared_drive_ids(self) -> dict[str, str]:
+        result: dict[str, str] = {}
+        for drive in self.query(["backend", "drives", self.remote_root]):
+            name, identifier = str(drive.get("name", "")), str(drive.get("id", ""))
+            if name and ID_PATTERN.fullmatch(identifier):
+                result[name] = identifier
+        return result
+
+    def folders(self, parent: DriveFolder) -> list[DriveFolder]:
+        result = []
+        for item in self.query(["lsjson", parent.remote, "--dirs-only"]):
+            identifier = str(item.get("ID", ""))
+            if item.get("IsDir") and ID_PATTERN.fullmatch(identifier):
+                name = str(item.get("Name", item.get("Path", "")))
+                # shared_with_me is only needed to list the virtual root. Once
+                # a shared folder ID is known, root_folder_id gives reliable
+                # access to all of its children and permits writable folders.
+                result.append(DriveFolder(name, identifier, parent.drive_id, parent.label + " / " + name, remote_name=self.remote_name))
+        return sorted(result, key=lambda folder: folder.name.casefold())
+
+    def items(self, parent: DriveFolder) -> list[DriveEntry]:
+        result: list[DriveEntry] = []
+        for item in self.query(["lsjson", parent.remote]):
+            name = str(item.get("Name", item.get("Path", ""))).strip()
+            if not name:
+                continue
+            result.append(
+                DriveEntry(
+                    name=name,
+                    identifier=str(item.get("ID", "")),
+                    parent=parent,
+                    is_directory=bool(item.get("IsDir")),
+                    size=max(0, int(item.get("Size", 0) or 0)),
+                    modified=str(item.get("ModTime", "")),
+                )
+            )
+        return sorted(result, key=lambda entry: (not entry.is_directory, entry.name.casefold()))
+
+    def resolve_virtual(self, value: str, roots: list[DriveFolder]) -> list[DriveFolder]:
+        parts = virtual_drive_parts(value)
+        managed = MANAGED_PATH.match(value)
+        if managed:
+            options = managed_options(value)
+            if options.get("shared_with_me") == "true":
+                base = next((folder for folder in roots if folder.shared_with_me), None)
+                if base is None:
+                    raise ValueError("Раздел «Доступные мне» недоступен текущему аккаунту.")
+                return [base]
+            drive_id = options.get("team_drive", "")
+            folder_id = options.get("root_folder_id") or drive_id or "root"
+            base = next(
+                (folder for folder in roots if folder.drive_id == drive_id and not folder.shared_with_me),
+                None,
+            )
+            if base is None:
+                raise ValueError("Выбранный общий диск недоступен текущему аккаунту.")
+            trail = [base] if folder_id in (base.folder_id, "root") else [
+                DriveFolder("Выбранная папка", folder_id, drive_id, base.label + " / папка " + folder_id, remote_name=self.remote_name)
+            ]
+            names = [name for name in value[managed.end():].split("/") if name]
+            for name in names:
+                matches = [folder for folder in self.folders(trail[-1]) if folder.name == name]
+                if len(matches) != 1:
+                    raise ValueError("Облачный путь неоднозначен или недоступен. Выберите папку вручную.")
+                trail.append(matches[0])
+            return trail
+        if not parts:
+            return []
+        kind, drive_name, names = parts
+        if kind == "shared_with_me":
+            matches = [folder for folder in roots if folder.shared_with_me]
+        elif kind == "my":
+            matches = [folder for folder in roots if not folder.drive_id and not folder.shared_with_me]
+        else:
+            matches = [folder for folder in roots if folder.drive_id and folder.name == drive_name]
+        if len(matches) != 1:
+            raise ValueError("Общий диск не найден или его имя неоднозначно. Выберите диск вручную. Исходный путь сохранён.")
+        trail = [matches[0]]
+        for name in names:
+            matches = [folder for folder in self.folders(trail[-1]) if folder.name == name]
+            if len(matches) != 1:
+                raise ValueError(f"Папка «{name}» не найдена или имеет дубликаты. Выберите её вручную. Исходный путь сохранён.")
+            trail.append(matches[0])
+        return trail
+
+
+class BrowseThread(QThread):
+    def __init__(self, operation, parent=None):
+        super().__init__(parent)
+        self.operation = operation
+        self.result = None
+        self.error = ""
+
+    def run(self):
+        try:
+            self.result = self.operation()
+        except Exception as exc:
+            self.error = str(exc)
+
+
+class DriveFolderDialog(QDialog):
+    def __init__(
+        self,
+        executable: str,
+        original: str = "",
+        parent=None,
+        remote_name: str = GOOGLE_DRIVE_REMOTE,
+    ):
+        super().__init__(parent)
+        self.setObjectName("cloudFolderDialog")
+        self.setWindowTitle("Google Drive · папка назначения")
+        self.resize(660, 520)
+        self.setMinimumSize(480, 360)
+        self.client = DriveClient(executable, remote_name)
+        self.trail: list[DriveFolder] = []
+        self.roots: list[DriveFolder] = []
+        self.selected_folder: DriveFolder | None = None
+        self.thread: BrowseThread | None = None
+        self.closing = False
+        self.setStyleSheet("""
+            QDialog#cloudFolderDialog { background: #f8fafd; color: #202124; }
+            QDialog#cloudFolderDialog QLabel { color: #202124; background: transparent; }
+            QDialog#cloudFolderDialog QListWidget {
+                background: #ffffff; color: #202124; border: 1px solid #dadce0;
+                border-radius: 10px; padding: 6px; outline: none;
+            }
+            QDialog#cloudFolderDialog QListWidget::item {
+                color: #202124; background: #ffffff; padding: 10px 8px; border-radius: 6px;
+            }
+            QDialog#cloudFolderDialog QListWidget::item:hover { background: #f1f3f4; color: #202124; }
+            QDialog#cloudFolderDialog QListWidget::item:selected { background: #d2e3fc; color: #174ea6; }
+            QDialog#cloudFolderDialog QPushButton {
+                background: #ffffff; color: #202124; border: 1px solid #dadce0;
+                border-radius: 8px; min-height: 34px; padding: 0 14px;
+            }
+            QDialog#cloudFolderDialog QPushButton:hover { background: #f1f3f4; color: #202124; }
+            QDialog#cloudFolderDialog QPushButton:disabled { background: #f1f3f4; color: #80868b; }
+            QDialog#cloudFolderDialog QPushButton#primary { background: #d2e3fc; color: #202124; }
+        """)
+        layout = QVBoxLayout(self)
+        self.path_label = QLabel("Мой диск, доступные мне и общие диски")
+        self.path_label.setWordWrap(True)
+        layout.addWidget(self.path_label)
+        if original:
+            original_label = QLabel("Было выбрано: " + original)
+            original_label.setWordWrap(True)
+            layout.addWidget(original_label)
+        self.list = QListWidget()
+        self.list.itemDoubleClicked.connect(self.enter_folder)
+        layout.addWidget(self.list, 1)
+        self.status = QLabel("Подключение…")
+        self.status.setWordWrap(True)
+        layout.addWidget(self.status)
+        actions = QHBoxLayout()
+        self.back = QPushButton("Назад")
+        self.back.clicked.connect(self.go_back)
+        self.choose = QPushButton("Выбрать эту папку", objectName="primary")
+        self.choose.clicked.connect(self.choose_current)
+        self.cancel = QPushButton("Отмена")
+        self.cancel.clicked.connect(self.reject)
+        for button in (self.back, self.choose, self.cancel):
+            actions.addWidget(button)
+        layout.addLayout(actions)
+
+        def initial():
+            roots = self.client.roots()
+            try:
+                trail = self.client.resolve_virtual(original, roots)
+                children = self.client.folders(trail[-1]) if trail else roots
+                return roots, trail, children, ""
+            except ValueError as exc:
+                return roots, [], roots, str(exc)
+        self.run_query(initial, self.initial_loaded)
+
+    def run_query(self, operation, callback):
+        if self.thread is not None:
+            return
+        self.list.setEnabled(False)
+        self.back.setEnabled(False)
+        self.choose.setEnabled(False)
+        self.status.setText("Чтение папок Google Drive…")
+        thread = BrowseThread(operation, self)
+        self.thread = thread
+        def finished():
+            self.thread = None
+            if self.closing:
+                super(DriveFolderDialog, self).reject()
+            elif thread.error:
+                self.status.setText(thread.error + "\nНазначение не изменено. Можно отменить выбор.")
+                self.list.setEnabled(True)
+                self.back.setEnabled(bool(self.trail))
+            else:
+                callback(thread.result)
+            thread.deleteLater()
+        thread.finished.connect(finished)
+        thread.start()
+
+    def initial_loaded(self, result):
+        self.roots, self.trail, folders, warning = result
+        self.show_folders(folders)
+        if warning:
+            self.status.setText(warning)
+
+    def show_folders(self, folders):
+        self.list.clear()
+        for folder in folders:
+            item = QListWidgetItem(folder.name)
+            item.setToolTip(folder.label + "\nID: " + folder.folder_id)
+            item.setData(Qt.ItemDataRole.UserRole, folder)
+            self.list.addItem(item)
+        self.path_label.setText(
+            self.trail[-1].label if self.trail else "Мой диск, доступные мне и общие диски"
+        )
+        shared_root = bool(self.trail and self.trail[-1].shared_with_me)
+        self.status.setText(
+            "Откройте папку, которой с вами поделились: корень «Доступные мне» выбрать нельзя."
+            if shared_root else
+            "Двойной щелчок — открыть папку. Кнопка ниже — подтвердить назначение."
+        )
+        self.list.setEnabled(True)
+        self.back.setEnabled(bool(self.trail))
+        self.choose.setEnabled(bool(self.trail) and not shared_root)
+
+    def enter_folder(self, item):
+        folder = item.data(Qt.ItemDataRole.UserRole)
+        def loaded(children):
+            self.trail.append(folder)
+            self.show_folders(children)
+        self.run_query(lambda: self.client.folders(folder), loaded)
+
+    def go_back(self):
+        if len(self.trail) <= 1:
+            self.trail = []
+            self.show_folders(self.roots)
+        else:
+            target = self.trail[-2]
+            def loaded(children):
+                self.trail.pop()
+                self.show_folders(children)
+            self.run_query(lambda: self.client.folders(target), loaded)
+
+    def choose_current(self):
+        if self.thread is None and self.trail:
+            self.selected_folder = self.trail[-1]
+            self.accept()
+
+    def reject(self):
+        if self.thread is not None:
+            self.closing = True
+            self.client.cancel()
+            self.status.setText("Отмена запроса…")
+            self.cancel.setEnabled(False)
+        else:
+            super().reject()
+
+    def closeEvent(self, event):
+        if self.thread is not None:
+            self.reject()
+            event.ignore()
+        else:
+            super().closeEvent(event)
+
+
+class DriveItemDialog(QDialog):
+    """Google Drive-like browser that selects several cloud files and folders."""
+
+    def __init__(
+        self,
+        executable: str,
+        parent=None,
+        remote_name: str = GOOGLE_DRIVE_REMOTE,
+    ) -> None:
+        super().__init__(parent)
+        self.setObjectName("cloudItemDialog")
+        self.setWindowTitle("Google Drive · выбрать файлы и папки")
+        self.resize(760, 560)
+        self.setMinimumSize(560, 420)
+        self.client = DriveClient(executable, remote_name)
+        self.roots: list[DriveFolder] = []
+        self.trail: list[DriveFolder] = []
+        self.thread: BrowseThread | None = None
+        self.closing = False
+        self.selected_items: list[DriveEntry] = []
+        self.setStyleSheet("""
+            QDialog#cloudItemDialog { background: #f8fafd; color: #202124; }
+            QDialog#cloudItemDialog QLabel { color: #202124; background: transparent; }
+            QDialog#cloudItemDialog QListWidget {
+                background: #ffffff; color: #202124; border: 1px solid #dadce0;
+                border-radius: 14px; padding: 8px; outline: none;
+            }
+            QDialog#cloudItemDialog QListWidget::item {
+                color: #202124; background: #ffffff; padding: 11px 10px;
+                border-radius: 8px;
+            }
+            QDialog#cloudItemDialog QListWidget::item:hover { background: #f1f3f4; }
+            QDialog#cloudItemDialog QListWidget::item:selected {
+                background: #d2e3fc; color: #174ea6;
+            }
+            QDialog#cloudItemDialog QPushButton {
+                background: #ffffff; color: #202124; border: 1px solid #dadce0;
+                border-radius: 18px; min-height: 36px; padding: 0 16px;
+            }
+            QDialog#cloudItemDialog QPushButton:hover { background: #f1f3f4; }
+            QDialog#cloudItemDialog QPushButton:disabled { color: #9aa0a6; }
+            QDialog#cloudItemDialog QPushButton#primary {
+                background: #1a73e8; color: #ffffff; border-color: #1a73e8;
+            }
+        """)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 18, 20, 18)
+        layout.setSpacing(10)
+        title = QLabel("Выберите файлы и папки")
+        title.setStyleSheet("font-size: 20px; font-weight: 700;")
+        layout.addWidget(title)
+        self.path_label = QLabel("Мой диск, доступные мне и общие диски")
+        self.path_label.setWordWrap(True)
+        layout.addWidget(self.path_label)
+        self.list = QListWidget()
+        self.list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.list.itemDoubleClicked.connect(self.enter_selected)
+        self.list.itemSelectionChanged.connect(self.selection_changed)
+        layout.addWidget(self.list, 1)
+        self.status = QLabel("Подключение к Google Drive…")
+        self.status.setWordWrap(True)
+        layout.addWidget(self.status)
+        actions = QHBoxLayout()
+        self.back = QPushButton("Назад")
+        self.back.clicked.connect(self.go_back)
+        self.choose_current = QPushButton("Выбрать текущую папку")
+        self.choose_current.clicked.connect(self.select_current_folder)
+        self.choose = QPushButton("Добавить выбранное", objectName="primary")
+        self.choose.clicked.connect(self.select_entries)
+        self.cancel = QPushButton("Отмена")
+        self.cancel.clicked.connect(self.reject)
+        actions.addWidget(self.back)
+        actions.addWidget(self.choose_current)
+        actions.addStretch()
+        actions.addWidget(self.cancel)
+        actions.addWidget(self.choose)
+        layout.addLayout(actions)
+        self.run_query(self.client.roots, self.roots_loaded)
+
+    def run_query(self, operation, callback) -> None:
+        if self.thread is not None:
+            return
+        self.list.setEnabled(False)
+        self.back.setEnabled(False)
+        self.choose.setEnabled(False)
+        self.choose_current.setEnabled(False)
+        self.status.setText("Чтение Google Drive…")
+        thread = BrowseThread(operation, self)
+        self.thread = thread
+
+        def finished() -> None:
+            self.thread = None
+            if self.closing:
+                super(DriveItemDialog, self).reject()
+            elif thread.error:
+                self.status.setText(thread.error)
+                self.list.setEnabled(True)
+                self.back.setEnabled(bool(self.trail))
+            else:
+                callback(thread.result)
+            thread.deleteLater()
+
+        thread.finished.connect(finished)
+        thread.start()
+
+    def roots_loaded(self, roots: list[DriveFolder]) -> None:
+        self.roots = roots
+        self.trail = []
+        self.show_roots()
+
+    def show_roots(self) -> None:
+        self.list.clear()
+        for folder in self.roots:
+            item = QListWidgetItem("▰  " + folder.name)
+            item.setData(Qt.ItemDataRole.UserRole, folder)
+            self.list.addItem(item)
+        self.path_label.setText("Google Drive")
+        self.status.setText("Двойной щелчок — открыть диск")
+        self.list.setEnabled(True)
+        self.back.setEnabled(False)
+        self.choose.setEnabled(False)
+        self.choose_current.setEnabled(False)
+
+    def show_entries(self, entries: list[DriveEntry]) -> None:
+        self.list.clear()
+        for entry in entries:
+            prefix = "▰" if entry.is_directory else "▤"
+            size = "" if entry.is_directory else f"   {self.human_size(entry.size)}"
+            item = QListWidgetItem(f"{prefix}  {entry.name}{size}")
+            item.setToolTip(entry.label)
+            item.setData(Qt.ItemDataRole.UserRole, entry)
+            self.list.addItem(item)
+        current = self.trail[-1]
+        self.path_label.setText(current.label)
+        self.status.setText("Выберите несколько объектов или откройте папку двойным щелчком")
+        self.list.setEnabled(True)
+        self.back.setEnabled(True)
+        self.choose_current.setEnabled(not current.shared_with_me)
+        self.selection_changed()
+
+    @staticmethod
+    def human_size(value: int) -> str:
+        size = float(max(0, value))
+        for suffix in ("Б", "КБ", "МБ", "ГБ", "ТБ"):
+            if size < 1024 or suffix == "ТБ":
+                return f"{size:.1f} {suffix}" if suffix != "Б" else f"{int(size)} Б"
+            size /= 1024
+        return f"{size:.1f} ТБ"
+
+    def enter_selected(self, item: QListWidgetItem) -> None:
+        value = item.data(Qt.ItemDataRole.UserRole)
+        if isinstance(value, DriveFolder):
+            folder = value
+        elif isinstance(value, DriveEntry):
+            folder = value.folder
+        else:
+            folder = None
+        if folder is None:
+            return
+
+        def loaded(entries: list[DriveEntry]) -> None:
+            self.trail.append(folder)
+            self.show_entries(entries)
+
+        self.run_query(lambda: self.client.items(folder), loaded)
+
+    def go_back(self) -> None:
+        if not self.trail:
+            return
+        if len(self.trail) == 1:
+            self.trail = []
+            self.show_roots()
+            return
+        target = self.trail[-2]
+
+        def loaded(entries: list[DriveEntry]) -> None:
+            self.trail.pop()
+            self.show_entries(entries)
+
+        self.run_query(lambda: self.client.items(target), loaded)
+
+    def selection_changed(self) -> None:
+        entries = [
+            item.data(Qt.ItemDataRole.UserRole)
+            for item in self.list.selectedItems()
+        ]
+        selected = [entry for entry in entries if isinstance(entry, DriveEntry)]
+        self.choose.setEnabled(bool(selected))
+        if selected:
+            self.status.setText(f"Выбрано объектов: {len(selected)}")
+
+    def select_entries(self) -> None:
+        self.selected_items = [
+            item.data(Qt.ItemDataRole.UserRole)
+            for item in self.list.selectedItems()
+            if isinstance(item.data(Qt.ItemDataRole.UserRole), DriveEntry)
+        ]
+        if self.selected_items:
+            self.accept()
+
+    def select_current_folder(self) -> None:
+        if not self.trail or self.trail[-1].shared_with_me:
+            return
+        folder = self.trail[-1]
+        self.selected_items = [
+            DriveEntry(
+                folder.name,
+                folder.folder_id,
+                folder,
+                True,
+            )
+        ]
+        self.accept()
+
+    def reject(self) -> None:
+        if self.thread is not None:
+            self.closing = True
+            self.client.cancel()
+            self.status.setText("Отмена запроса…")
+            self.cancel.setEnabled(False)
+        else:
+            super().reject()
+
+    def closeEvent(self, event) -> None:  # noqa: N802
+        if self.thread is not None:
+            self.reject()
+            event.ignore()
+        else:
+            super().closeEvent(event)

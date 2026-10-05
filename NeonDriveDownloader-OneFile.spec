@@ -5,7 +5,7 @@ a = Analysis(
     ['main.py'],
     pathex=[],
     binaries=[],
-    datas=[('assets/neon-drive-v2.png', 'assets')],
+    datas=[('assets/neon-drive-v3.png', 'assets')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
@@ -35,5 +35,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=['assets/neon-drive-v2.ico'],
+    icon=['assets/neon-drive-v3.ico'],
 )

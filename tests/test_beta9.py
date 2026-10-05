@@ -1,0 +1,247 @@
+from __future__ import annotations
+
+import os
+import sqlite3
+import tempfile
+import time
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+os.environ.setdefault("NEON_DRIVE_DISABLE_AUTO_UPDATE", "1")
+os.environ.setdefault("NEON_DRIVE_DISABLE_NETWORK", "1")
+
+from PySide6.QtTest import QTest
+from PySide6.QtWidgets import QApplication, QLabel
+
+from neon_drive.app import MainWindow
+from neon_drive.drive_browser import (
+    DriveClient,
+    DriveFolder,
+    DriveFolderDialog,
+    ExplorerDriveTarget,
+    SharedDriveAccessError,
+    explorer_shared_drive_target,
+    is_managed_drive_path,
+    managed_options,
+    remote_from_explorer_path,
+    virtual_drive_parts,
+)
+from neon_drive.transfer_direction import detect_direction, location_kind, location_label
+
+
+class Beta9Tests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def window(self):
+        window = MainWindow()
+        window.notifications_check.setChecked(False)
+        window.auto_start_check.setChecked(False)
+
+        def cleanup():
+            window.force_exit = True
+            window.close()
+            window.deleteLater()
+            self.app.processEvents()
+
+        self.addCleanup(cleanup)
+        return window
+
+    def wait_ready(self, dialog):
+        deadline = time.monotonic() + 3
+        while dialog.thread is not None and time.monotonic() < deadline:
+            QTest.qWait(10)
+        self.assertIsNone(dialog.thread)
+
+    def test_picker_has_explicit_light_high_contrast_style(self):
+        root = DriveFolder("Мой диск", "root", label="Мой диск")
+        with patch.object(DriveClient, "roots", return_value=[root]), patch.object(
+            DriveClient, "folders", return_value=[]
+        ):
+            dialog = DriveFolderDialog("unused")
+            self.addCleanup(dialog.deleteLater)
+            self.wait_ready(dialog)
+        style = dialog.styleSheet().casefold()
+        self.assertIn("background: #ffffff", style)
+        self.assertIn("color: #202124", style)
+        self.assertIn("qlistwidget::item:selected", style)
+
+    def test_shared_with_me_is_listed_and_exact_folder_becomes_normal_remote(self):
+        client = DriveClient("rclone")
+        with patch.object(client, "query", side_effect=[[], [{"ID": "folder123", "Name": "Проект", "IsDir": True}]]):
+            roots = client.roots()
+            shared = next(folder for folder in roots if folder.shared_with_me)
+            children = client.folders(shared)
+        self.assertEqual(shared.remote, "NeonGoogleDrive,shared_with_me:")
+        self.assertIn("Доступные мне", [folder.name for folder in roots])
+        self.assertEqual(children[0].remote, "NeonGoogleDrive,root_folder_id=folder123:")
+        self.assertFalse(children[0].shared_with_me)
+        self.assertTrue(is_managed_drive_path(shared.remote))
+        self.assertEqual(managed_options(shared.remote), {"shared_with_me": "true"})
+
+    def test_shared_root_cannot_be_destination_but_shared_folder_can(self):
+        shared = DriveFolder("Доступные мне", "root", label="Доступные мне", shared_with_me=True)
+        child = DriveFolder("Upload here", "folder123", label="Доступные мне / Upload here")
+        with patch.object(DriveClient, "roots", return_value=[shared]), patch.object(
+            DriveClient, "folders", side_effect=lambda folder: [child] if folder == shared else []
+        ):
+            dialog = DriveFolderDialog("unused")
+            self.addCleanup(dialog.deleteLater)
+            self.wait_ready(dialog)
+            dialog.enter_folder(dialog.list.item(0))
+            self.wait_ready(dialog)
+            self.assertFalse(dialog.choose.isEnabled())
+            self.assertIn("корень", dialog.status.text())
+            dialog.enter_folder(dialog.list.item(0))
+            self.wait_ready(dialog)
+            self.assertTrue(dialog.choose.isEnabled())
+
+    def test_shared_with_me_localized_path_is_understood(self):
+        self.assertEqual(
+            virtual_drive_parts("G:/Доступные мне/Проект/Видео"),
+            ("shared_with_me", "", ["Проект", "Видео"]),
+        )
+
+    def test_explorer_path_converts_without_walking_cloud_folders(self):
+        self.assertEqual(
+            remote_from_explorer_path("G:/My Drive/Video/Final"),
+            "NeonGoogleDrive:Video/Final",
+        )
+        self.assertEqual(
+            remote_from_explorer_path(
+                "H:/Unidades compartidas/Clients Materials/Test carpet",
+                {"Clients Materials": "drive123"},
+            ),
+            "NeonGoogleDrive,team_drive=drive123:Test carpet",
+        )
+        self.assertEqual(
+            remote_from_explorer_path("G:/Доступные мне/Проект"),
+            "NeonGoogleDrive,shared_with_me:Проект",
+        )
+
+    def test_my_drive_resolution_never_queries_cloud_browser(self):
+        window = self.window()
+        with patch.object(DriveClient, "query", side_effect=AssertionError("no cloud search")):
+            remote = window.resolve_explorer_google_destination("G:/My Drive/Video")
+        self.assertEqual(remote, "NeonGoogleDrive:Video")
+
+    def test_shared_drive_resolution_only_reads_drive_ids_once(self):
+        window = self.window()
+        path = "H:/Unidades compartidas/Clients Materials/Test carpet"
+        with patch.object(window, "resolved_rclone_executable", return_value="rclone"), patch.object(DriveClient, "shared_drive_ids", return_value={"Clients Materials": "drive123"}) as ids, patch.object(
+            DriveClient, "folders", side_effect=AssertionError("folder walk is forbidden")
+        ):
+            self.assertEqual(
+                window.resolve_explorer_google_destination(path),
+                "NeonGoogleDrive,team_drive=drive123:Test carpet",
+            )
+            self.assertEqual(window.resolve_explorer_google_destination(path), "NeonGoogleDrive,team_drive=drive123:Test carpet")
+        ids.assert_called_once()
+
+    def test_explorer_shared_drive_uses_exact_drivefs_folder_id(self):
+        path = "H:/Unidades compartidas/Clients Materials/Test carpet"
+        with tempfile.TemporaryDirectory() as temporary:
+            profile = Path(temporary) / "100"
+            profile.mkdir()
+            database = sqlite3.connect(profile / "metadata_sqlite_db")
+            database.execute(
+                "CREATE TABLE items (stable_id INTEGER PRIMARY KEY, id TEXT, "
+                "local_title TEXT, is_folder BOOLEAN, team_drive_stable_id INTEGER, "
+                "is_tombstone BOOLEAN)"
+            )
+            database.execute(
+                "CREATE TABLE stable_parents (item_stable_id INTEGER, parent_stable_id INTEGER)"
+            )
+            database.executemany(
+                "INSERT INTO items VALUES (?, ?, ?, 1, 10, 0)",
+                [
+                    (10, "drive123", "Clients Materials"),
+                    (20, "folder456", "Test carpet"),
+                ],
+            )
+            database.execute("INSERT INTO stable_parents VALUES (20, 10)")
+            database.commit()
+            database.close()
+            with patch.dict(os.environ, {"NEON_DRIVEFS_DIR": temporary}):
+                target = explorer_shared_drive_target(path)
+
+        self.assertEqual(target, ExplorerDriveTarget("drive123", "folder456"))
+        self.assertEqual(
+            remote_from_explorer_path(path, {"Clients Materials": "drive123"}, target),
+            "NeonGoogleDrive,team_drive=drive123,root_folder_id=folder456:",
+        )
+
+    def test_shared_drive_account_mismatch_is_reported_before_transfer(self):
+        window = self.window()
+        path = "H:/Unidades compartidas/Clients Materials/Test carpet"
+        target = ExplorerDriveTarget("drive-from-explorer", "folder-from-explorer")
+        with patch.object(window, "resolved_rclone_executable", return_value="rclone"), patch("neon_drive.app.explorer_shared_drive_target", return_value=target), patch.object(
+            DriveClient, "shared_drive_ids", return_value={}
+        ):
+            with self.assertRaises(SharedDriveAccessError):
+                window.resolve_explorer_google_destination(path)
+
+    def test_oauth_starts_after_explorer_selection_not_before(self):
+        window = self.window()
+        path = "G:/My Drive/Video"
+        events = []
+        with patch("neon_drive.app.QFileDialog.getExistingDirectory", side_effect=lambda *_args: events.append("select") or path), patch(
+            "neon_drive.app.google_drive_connected", return_value=False
+        ), patch.object(window, "start_google_drive_oauth", side_effect=lambda: events.append("oauth")), patch(
+            "neon_drive.app.DriveFolderDialog"
+        ) as browser:
+            window.use_or_connect_google_drive()
+        self.assertEqual(events, ["select", "oauth"])
+        self.assertEqual(window.upload_destination.text(), path)
+        browser.assert_not_called()
+
+    def test_start_uses_resolved_remote_but_keeps_explorer_path_visible(self):
+        window = self.window()
+        window.upload_addon_enabled = True
+        path = "G:/My Drive/Video"
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / "movie.bin"
+            source.write_bytes(b"neon")
+            window.upload_sources.setPlainText(str(source))
+            with patch("neon_drive.app.google_drive_connected", return_value=True), patch.object(
+                window, "resolved_rclone_executable", return_value="rclone"
+            ):
+                window.accept_destination_folder("upload", path, force_cloud=True)
+                with patch.object(window, "fill_worker_slots"):
+                    window.start_transfers("upload")
+            self.assertEqual(window.active_destination, "NeonGoogleDrive:Video")
+            self.assertEqual(window.upload_destination.text(), path)
+            self.assertTrue(window.running)
+            window.running = False
+            window.active_destination = None
+
+    def test_physical_cloud_and_network_paths_are_auto_detected(self):
+        self.assertEqual(location_kind("C:/Video/movie.mp4"), "physical")
+        self.assertEqual(location_kind("//NAS/media/movie.mp4"), "network")
+        self.assertEqual(location_kind("NeonGoogleDrive:Video"), "cloud")
+        self.assertEqual(
+            detect_direction(["C:/Video/movie.mp4"], "H:/Unidades compartidas/Clients/Video")[0],
+            "upload",
+        )
+        self.assertEqual(detect_direction(["NeonGoogleDrive:Video"], "D:/Downloads")[0], "download")
+        direction, text = detect_direction(["C:/Video/movie.mp4"], "D:/Archive")
+        self.assertIsNone(direction)
+        self.assertIn("локальное копирование", text)
+        self.assertIn("ФИЗИЧЕСКИЙ ДИСК", location_label("C:/Video/movie.mp4"))
+
+    def test_transfer_headings_follow_entered_paths(self):
+        window = self.window()
+        panel = window.transfer_panels["upload"]
+        panel.sources.setPlainText("C:/Video/movie.mp4")
+        panel.destination.setText("NeonGoogleDrive:Video")
+        QTest.qWait(10)
+        headings = [label.text() for label in panel.page.findChildren(QLabel)]
+        self.assertIn("С КОМПЬЮТЕРА", headings)
+        self.assertIn("В GOOGLE DRIVE", headings)
+
+
+if __name__ == "__main__":
+    unittest.main()

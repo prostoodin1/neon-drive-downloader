@@ -9,6 +9,11 @@ dist/
 *.spec
 !NeonDriveDownloader.spec
 !NeonDriveDownloader-OneFile.spec
+!NeonDriveInstaller.spec
+!NeonDriveInstallerMac.spec
+vendor/rclone/rclone.exe
+vendor/rclone/rclone
+vendor/rclone/install.json
 
 # Local application and Codex artifacts
 outputs/

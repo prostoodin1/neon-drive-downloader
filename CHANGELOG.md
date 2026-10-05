@@ -1,5 +1,391 @@
 # Changelog
 
+## 6.0.4-alpha
+
+- Added Russian, English and Spanish UI languages with immediate switching and saved preferences.
+- Added an official About section with version, Alpha channel, bundled Rclone, platform support and project links.
+- Replaced the application and installer artwork with the new Neon Drive v3 icon.
+- Rebuilt public screenshots with fictional paths and demo account data only.
+- Refreshed README and release presentation for Windows and both macOS architectures.
+- Kept the high-contrast multi-folder picker and all Generation 6 transfer workflows.
+
+## 6.0.0-beta.3
+
+- Fixed unreadable folder names in the multi-folder Explorer/Finder picker.
+- Gave the picker an explicit soft-light palette independent of the application theme.
+- Added clear hover and blue selection states, readable column headers and controls.
+- Increased the picker size while retaining multi-folder selection.
+- Added regression coverage for picker contrast and minimum dimensions.
+
+## 6.0.0-beta.2
+
+- Removed the Google Drive-only restriction from the Download page.
+- Added separate Google Drive, Explorer file, and Explorer folder source buttons.
+- Enabled drag-and-drop from Explorer on both Download and Upload pages.
+- Kept automatic route detection: Drive paths use Neon Rclone, while ordinary local,
+  external, and network paths use the matching local transfer engine.
+- Added cross-platform regression coverage for both Download source workflows.
+
+## 6.0.0-beta.1
+
+- Rebuilt the main window around two clear Google Drive-style pages: Download and Upload.
+- Added a native cloud item browser for choosing several Google Drive files or folders.
+- Made upload a core feature with local file, multiple-file, folder, and drag-and-drop input.
+- Replaced the advanced settings surface with a compact essentials-only settings page.
+- Added an account-aware header, human-readable cloud paths, clearer active-transfer cards,
+  and a collapsible transfer list.
+- Disabled maximize/fullscreen and constrained the window to useful desktop sizes so primary
+  actions remain visible without manually stretching the application.
+- Switched fresh and migrated installations to the soft Google Drive light theme.
+- Added reproducible, anonymized Generation 6 screenshots for the project page and website.
+- Added regression coverage for the two-page navigation and cloud file/folder selection.
+
+## 5.6.0-beta.6
+
+- Restore real simultaneous Google Drive jobs when `Multiple at once` / `All` is
+  selected. Sequential mode remains available and continues to run exactly one item.
+- Share a bounded Google API request budget across active Rclone processes. This
+  smooths metadata/finalization calls without adding `--bwlimit` or capping file traffic.
+- Add a one-time welcome card for a clean installation and a one-time What's New card
+  after every version upgrade. The installed version is remembered before the dialog opens.
+- Promote whole folders to a first-class source: `Add folders` supports extended
+  multi-selection and queues every chosen directory or drive root without flattening it.
+
+## 5.6.0-beta.5
+
+- Show the exact Google-returned email as `OAuth2 connected to` for every account.
+  Placeholder addresses such as `team@example.com` are rejected and a reconnect is
+  requested instead of presenting test metadata as a real identity.
+- Require a verified Google email before saving a newly authorized OAuth profile and
+  repeat the same identity in the success dialog, account selector, badge, and details.
+- Serialize direct Google Drive files through one shared Neon queue. Independent Rclone
+  processes no longer contend during Drive finalization, and every selected file starts
+  automatically after the previous file has been accepted by Google.
+- Distinguish `bytes sent` from `file completed`: the row shows final verification and
+  the overall indicator cannot claim 100% until every Rclone process exits successfully.
+
+## 5.6.0-beta.4
+
+- Detect Google Drive `401 Invalid Credentials` separately from folder/path errors.
+  Neon now keeps the Explorer/Finder path, identifies the selected account, and
+  offers a one-click OAuth reconnect instead of displaying raw Rclone diagnostics.
+- Resume the pending transfer automatically after the selected account is
+  successfully reconnected and clear stale Shared Drive ID caches before retrying.
+- Rebuild the public main-screen images with the anonymous `C:/Downloads` path so
+  the local Windows user name is never published.
+- Reflow source and transfer actions into responsive two-row groups so every label,
+  including Full stop, remains readable in compact and normal window sizes.
+
+## 5.6.0-beta.3
+
+- Add a permanently visible Full stop action that cancels the pending queue and
+  closes every Rclone, Robocopy, or Turbo worker owned by the active transfer.
+- Check local destination targets before starting: identical files are skipped,
+  changed files require confirmation, and existing folders are safely merged by
+  the selected engine. Direct cloud copies retain Rclone's per-item destination check.
+- Make whole-folder and drive selection explicit on both transfer pages and verify
+  ordinary local/network disk-to-disk folder transfers through the same queue.
+- Add Clear to the Transfers page to remove accumulated download/upload selections,
+  rows, terminals, and graphs without resetting lifetime traffic statistics.
+- Show the exact Google email, profile label, and account type for every connected
+  OAuth profile and for the currently active account.
+
+## 5.6.0-beta.2
+
+- Make direct Neon Rclone upload the default for Google Drive folders selected
+  in Explorer/Finder, so files go straight to the connected cloud account instead
+  of waiting for a second Google Drive for desktop synchronization pass.
+- Migrate the former ambiguous Ask route to direct cloud upload while preserving
+  an explicitly selected ordinary filesystem-copy preference.
+- Remove Neon's hidden four-active-file ceiling for Rclone queues. All/limited
+  modes can now run the requested number of jobs up to the global ten-job setting,
+  with no `--bwlimit` or other application bandwidth cap.
+- Tune Google Drive upload chunks by profile: 64 MiB balanced, 128 MiB fast,
+  256 MiB maximum, and 1 GiB extreme. New installations start with the fast
+  Rclone profile while keeping the safer profiles available.
+
+## 5.6.0-beta.1
+
+- Smooth Google Drive API pressure with longer timeouts, retry sleeps, and the
+  native Rclone Drive pacer without imposing a bandwidth cap.
+- Retry official Rclone package downloads up to four times on temporary network
+  timeouts, both in the application and release builders.
+- Fall back to the official Rclone GitHub release and its SHA256SUMS when the
+  primary downloads server is temporarily unreachable.
+- Auto-convert Explorer/Finder Google Drive source paths into managed direct
+  downloads to a local destination.
+- Allow sequential or bounded parallel file queues for every template, with up
+  to four selected Rclone files active at once.
+- Turn the primary action into a blue Continue button while live workers are
+  paused, and keep Robocopy restartable `/Z` mode in every performance template.
+- Add red/yellow/green speed zones, per-file mini graphs, and a selectable total
+  or per-file history that remains available when the queue finishes.
+
+## 5.5.0-beta.10
+
+- Add independent OAuth/Rclone profiles for multiple Google accounts with an
+  active-account selector and Personal, Workspace, and Team account categories.
+- Preserve the legacy single Google connection as the first account and keep
+  every token isolated in its own managed Rclone remote.
+- Make visible Stop resumable while a transfer is active: suspend the same
+  Rclone/Robocopy/Turbo worker and let Continue reuse the same PID and session.
+- Keep hard cancellation available in Advanced mode and cancel a waiting queue
+  normally when no worker has started yet.
+- Add real throttled Rclone pause/resume coverage with same-PID and SHA-256 checks.
+
+## 5.5.0-beta.9
+
+- Select the final Google Drive destination in Explorer/Finder and keep that
+  human-readable path visible while Neon prepares the managed Rclone target.
+- Resolve Windows Shared Drive destinations from Drive for desktop's read-only
+  metadata IDs, avoiding cloud folder-name walks and preventing accidental fallback.
+- Detect an OAuth account without access to the Explorer Shared Drive and offer
+  reconnection while preserving the chosen path and automatic start request.
+- Move successful-transfer totals into a dedicated application-data file and
+  migrate legacy values so application updates cannot reset the counter.
+- Add automatic local/physical/network/cloud path classification, visible Stop,
+  separate replace/add file buttons, and the Extreme 1 GiB upload-chunk profile.
+- Keep installers independent of GitHub Desktop/CLI/login and verify the complete
+  Windows/macOS packages through the release workflow.
+
+## 5.5.0-beta.7
+
+- Added Google Drive dark palette and contextual multicolor buttons.
+- Disabled automatic Rclone monitor opening, including migrated preferences.
+- Parse JSON stats in bytes; report preparation and idle phases, connection timeouts,
+  server errors, and retries without waiting for an integer percent on large files.
+- Separate Drive's 64 MiB upload chunk from local multi-thread chunk settings;
+  cap Rclone managed buffers at 512 MiB without disabling checksum checks.
+- Perform source readiness scans off the UI thread and avoid scanning folders
+  recursively just to populate the initial file list.
+- Add opt-in same-volume download staging for individual files, atomic final
+  placement and cleanup. Folder transfers and uploads remain direct.
+- Detect unambiguous network/cloud transfer direction with manual fallback.
+- Add native Apple Silicon builds and a macOS version manager with safe package
+  replacement/rollback and recoverable uninstall; keep Intel compatibility.
+- Test native GUI launch and DMG installation on both macOS architectures.
+
+## 5.5.0-beta.6
+
+- Added a macOS application and DMG release build with macOS 12 Monterey as the
+  minimum target, platform-native application data paths, Finder integration,
+  bundled Rclone, and login startup through a LaunchAgent.
+- The requested macOS 11 target is not supported by current official Rclone binaries;
+  the application reports the correct macOS 12 minimum instead of failing during transfers.
+- Added a separate Rclone monitor window with a live speed graph, current state,
+  and full terminal output; it can open automatically when an Rclone transfer starts.
+- Added green, yellow, and red hover borders and soft glows to the Slow, Optimal,
+  and Maximum template cards so their performance tradeoffs are easier to scan.
+- Added optional contextual button colors: blue for downloads, green for uploads,
+  yellow for folders, red for destructive actions, and purple for the Rclone monitor.
+- Added an automatic day/night theme that uses the light palette from 07:00 to 19:00
+  and the dark palette at night, while retaining all manual theme choices.
+- Rechecked the Beta 5 direction switch and device-login startup features shared by
+  upgrade logs #004, #005, and #006 to avoid duplicate controls or conflicting settings.
+- Added regression tests for macOS platform paths and version requirements, macOS
+  startup registration, DMG update selection, profile hover states, contextual colors,
+  the Rclone monitor, and automatic theme boundaries.
+
+## 5.5.0-beta.5
+
+- Added optional automatic full system diagnostics and safe repair at application startup.
+- Added Windows sign-in startup registration managed from Settings.
+- Added an option to keep Neon alive in the system tray after a background queue finishes.
+- Added a compact download/upload direction switch directly above the Home transfer arrow.
+- Made the selected Rclone chunk size control the real Google Drive upload chunk; the
+  manual maximum is now 2048 MiB (2 GiB), while the Extreme profile uses a safer
+  valid 512 MiB chunk (approximately 537 MB).
+- Fixed automatic update discovery in beta builds so newer prereleases are visible and
+  can be downloaded directly from the in-app Updates page.
+- Added a branded OAuth completion page that asks the browser tab to close automatically
+  after Google Drive is connected.
+- Fixed diagnostics for the managed `NeonGoogleDrive:` OAuth destination so it is never
+  treated as a local Explorer folder.
+- Made the version manager detect user/system installations across 32-bit and 64-bit
+  registry views and compare beta versions semantically.
+- Added an installer action to launch the registered Neon Drive uninstaller while retaining
+  user settings for a later reinstall; normal upgrades continue to preserve every setting.
+- Fixed startup restoration so a saved simple preset no longer overwrites manual Rclone,
+  queue, chunk, stream, checksum, or copy-profile settings after an update or restart.
+- Added focused tests for startup registration, direct Drive diagnostics, direction switching,
+  background completion behavior, uninstallation, version matching, and Drive chunk flags.
+
+## 5.5.0-beta.4
+
+- Added a one-click Google Drive OAuth2 connection using the bundled Rclone browser flow.
+- Added direct uploads to the managed `NeonGoogleDrive:` remote, bypassing Google Drive
+  for desktop while preserving the existing Explorer-folder workflow as an alternative.
+- Store the Google refresh token only in Neon's managed Rclone config and never print it
+  to the application terminal or session log.
+- Added connect, reconnect, disconnect, connection-status, and quick destination controls.
+- Force direct cloud transfers through one Rclone process and pass the managed config to
+  every direct upload while keeping multi-stream performance settings inside that process.
+- Added remote-path collision protection, Drive web opening, and automated OAuth/config tests.
+- Made the hidden AI CLI emit UTF-8 reliably on Windows consoles.
+
+## 5.5.0-beta.3
+
+- Added a persistent successful-transfer counter with total, download, and upload
+  volumes plus the number of days in the current statistics period.
+- Added manual counter reset and optional automatic reset when a new month begins.
+- Added a muted light Google Drive theme with contextual blue, green, yellow, and
+  red controls while retaining Dark, Light, and OLED themes.
+- Made release discovery and installer downloads use the public GitHub API and
+  direct public asset URLs exclusively; GitHub login and GitHub CLI are not required.
+- Made the transfer counter visible on Home and in the sidebar system card, with
+  detailed controls in Settings.
+
+## 5.5.0-beta.2
+
+- Rebuilt the application around the requested dark Neon dashboard with a
+  permanent left sidebar, compact status header, and system state card.
+- Combined download and upload setup on Home with source, destination, preset,
+  current transfers, live performance, and recent results in one view.
+- Redesigned Templates as three detailed Slow, Optimal, and Maximum profile cards.
+- Moved advanced configuration into a two-column Settings hub with section navigation.
+- Added automatic workspace-aware sizing, 900x640, 1180x760, and 1380x880 presets,
+  and responsive sidebar collapse so controls remain visible without maximizing.
+- Added a dark/light theme switch to Neon Drive Installer and automatic graceful
+  app shutdown before replacing an installed version.
+
+## 5.5.0-beta.1
+
+- Added a separate `NeonDriveInstaller.exe` version manager that lists GitHub
+  releases, displays their changelogs, and installs either new or previous versions.
+- Included the version manager in the universal setup and added a shortcut from
+  the Updates page and the Windows Start menu.
+- Redesigned the main application around a clean light interface with side
+  navigation enabled by default and a compact collapsible menu.
+- Added a dedicated Templates page with Slow, Optimal, and Maximum transfer cards
+  shared by downloads and uploads.
+- Kept releases ZIP-free: every release contains the application setup and the
+  separate version manager executable.
+
+## 5.4.0-beta.13
+
+- Renamed the product to Neon Drive and made the light theme the default for new installs.
+- Moved Settings behind a compact bottom gear beside the persistent system status.
+- Added shared Slow, Optimal, and Maximum presets for downloads and uploads.
+- Added a hidden JSON CLI for AI agents without exposing it as an application tab.
+- Enforced a single Neon Drive instance and reused its local IPC endpoint for CLI commands.
+- Bundled the official SHA-256-verified Rclone inside the universal installer and added
+  a safe reinstall action that removes only orphaned Neon-managed Rclone processes.
+- Closed background Neon Drive and Rclone after the final transfer when the window had
+  been closed with background continuation enabled.
+- Stopped publishing portable ZIP and legacy onefile packages; releases now contain only
+  the universal Setup executable.
+
+## 5.4.0-beta.12
+
+- Added a background system diagnostics card to Settings with a one-click
+  “check and repair” action and a detailed result report.
+- Checks Robocopy, Rclone, official download connectivity, free disk space,
+  application folders, configured destinations, Google Drive, and selected sources.
+- Safely creates missing service/download folders and automatically installs or
+  repairs the official Rclone build after SHA-256 verification.
+
+## 5.4.0-beta.11
+
+- Rejected uploads to the non-writable Google Drive virtual root and explained that
+  users must select My Drive, Shared drives, or a nested folder.
+- Probed destination create-and-rename support before starting a queue and surfaced
+  concrete per-file Rclone or Robocopy errors at the end of failed transfers.
+- Disabled local preallocation in Rclone to avoid Google Drive File Stream corruption
+  and size-check failures while preserving the original final filename and extension.
+- Added a mandatory source-readiness gate that waits for stable size and modification
+  time, active writers to release the file, and temporary partial names to disappear.
+- Rechecks the source after transfer and automatically returns it to the waiting queue
+  if it changed while being copied.
+- Added balanced, fast, maximum, extreme, and manual Rclone traffic profiles while
+  preserving the single Rclone process limit.
+- Expanded large-file tuning to 32 streams, 32 folder transfers, 64 checkers, and
+  configurable per-thread write buffering.
+- Modernized the transfer pages with clearer direction headers, compact actions,
+  refined cards and navigation surfaces, and start controls that remain visible in
+  the small-window layout.
+
+## 5.4.0-beta.10
+
+- Limited Rclone and hybrid transfers to one Rclone process at a time while keeping
+  multi-threaded transfer inside that process.
+- Blocked managed Rclone updates while an active transfer is still using `rclone.exe`.
+
+## 5.4.0-beta.9
+
+- Persisted every configurable transfer, Rclone, appearance, update, tray, log, and path setting.
+- Added restoration of the active tab using stable page identifiers even when optional tabs change.
+- Added restoration of window geometry, remembered manual size, position, and maximized state.
+- Added an in-app note explaining that settings and layout state are saved automatically.
+- Added a restart-level GUI test covering advanced/files tabs, sidebar state, window size,
+  theme, design, engine, Rclone options, source and destination paths, and active tab.
+
+## 5.4.0-beta.8
+
+- Added an optional Files tab controlled by a live Settings toggle.
+- Added a combined download and upload overview with source, destination, status,
+  per-file progress, transferred bytes, read/download speed, and effective write speed.
+- Kept the overview synchronized with queued, active, completed, failed, and stopped tasks.
+- Added a subtle horizontal page slide when selecting tabs in sidebar navigation mode.
+- Added GUI tests for dynamic tab insertion, aggregated file status, and sidebar slide animation.
+
+## 5.4.0-beta.7
+
+- Moved progress, speed, ETA, state, and the start action inside the Download and Upload pages.
+- Removed the transfer footer from Settings, Advanced mode, and Updates so it no longer follows
+  the user through unrelated pages.
+- Added small, standard, and large window presets plus a mode that remembers a manually resized window.
+- Added a Small screen design mode with tighter headers, controls, cards, and spacing.
+- Added independent Download and Upload status controls and GUI coverage for the new layouts.
+
+## 5.4.0-beta.6
+
+- Added top, expanded sidebar, and initially collapsed sidebar navigation layouts.
+- Added a Codex-style header control that smoothly collapses and restores the sidebar
+  without changing the active page.
+- Smoothed tab fades, sidebar movement, progress updates, and general interface transitions.
+- Added one-click download and connection of the official Windows Rclone executable.
+- Verified the official Rclone ZIP against its release SHA256SUMS before atomically replacing
+  the managed executable under the application data directory.
+
+## 5.4.0-beta.5
+
+- Added selectable Robocopy, Rclone, and safe hybrid copy engines for downloads and uploads.
+- Added Rclone chunk size, multi-thread cutoff, streams, transfers, checkers, buffer,
+  checksum, sparse-file compatibility, and retry controls.
+- Added an optional Advanced mode tab and hid the technical terminal in the simpler default mode.
+- Consolidated appearance controls into Settings and reduced the number of permanent top-level tabs.
+- Added Rclone progress parsing, engine routing tests, and protection against assigning two engines
+  to the same destination item.
+
+## 5.4.0-beta.4
+
+- Converted the upload screen into an optional beta-only add-on controlled from
+  the Updates tab with install, remove, and GitHub actions.
+- Hidden both the upload tab and add-on controls from stable builds.
+- Added compact, comfortable, and minimalist design modes with denser modern
+  buttons, tabs, cards, inputs, and spacing throughout the application.
+- Added manifest validation and isolated add-on storage under the application
+  data directory without touching files already uploaded to Google Drive.
+- Kept the most recently downloaded application installer in a single cache and
+  displayed its version on the Updates tab after restarting the app.
+
+## 5.4.0-beta.3
+
+- Added a dedicated `ВЫГРУЗКА` tab for copying local files and folders to a
+  Google Drive location selected through Windows Explorer.
+- Added independent source, destination, queue preview, terminal, pause, stop,
+  progress, speed, and ETA state for download and upload screens.
+- Kept uploads on Robocopy so Google Drive for desktop remains responsible for
+  caching and safely sending data to the cloud.
+
+## 5.4.0-beta.1
+
+- Added a Turbo profile that reads independent ranges of one large cloud-backed file in parallel.
+- Added a configurable 2–16 Turbo worker slider with an aggregate pressure limit across active files.
+- Added resumable `.neon-part` checkpoints for fully completed file segments.
+- Kept fast Robocopy as the automatic Turbo fallback for folders and multi-file trees.
+- Preserved pause, resume, stop, progress, speed, and ETA behavior for segmented copies.
+
 ## 5.3.0
 
 - Increased contrast for all application text and fixed unreadable QMessageBox dialogs.
